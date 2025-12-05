@@ -33,6 +33,11 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   const [sidebarOpen, setSidebarOpen] = useState(false) // Sidebar open/closed state - hidden by default, we have our own menu
   const [leafletLoaded, setLeafletLoaded] = useState(false)
   const MIN_ZOOM_FOR_LABELS = 15 // Only show labels when zoomed in enough
+  const [isTrackingLocation, setIsTrackingLocation] = useState(false) // Track if location is being watched
+  const [userLocation, setUserLocation] = useState<[number, number] | null>(null) // Store user's current location
+  const [locationError, setLocationError] = useState<string | null>(null) // Store location errors
+  const userLocationMarkerRef = useRef<any>(null) // Reference to the user location marker
+  const locationWatchIdRef = useRef<number | null>(null) // Reference to the watchPosition ID
 
   // Load Leaflet only on client side
   useEffect(() => {
@@ -386,6 +391,19 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     }, 150)
 
     return () => {
+      // Cleanup location tracking
+      if (locationWatchIdRef.current !== null) {
+        navigator.geolocation.clearWatch(locationWatchIdRef.current)
+        locationWatchIdRef.current = null
+      }
+      if (userLocationMarkerRef.current) {
+        if ((userLocationMarkerRef.current as any).accuracyCircle) {
+          map.current?.removeLayer((userLocationMarkerRef.current as any).accuracyCircle)
+        }
+        map.current?.removeLayer(userLocationMarkerRef.current)
+        userLocationMarkerRef.current = null
+      }
+
       // Cleanup
       if (map.current) {
         const L = (window as any).L
@@ -438,6 +456,159 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       }
     }
   }, [discoveredSignIds, leafletLoaded])
+
+  // Location tracking effect
+  useEffect(() => {
+    if (!map.current || !leafletLoaded || typeof window === 'undefined' || !isTrackingLocation) {
+      // Clean up if tracking is disabled
+      if (!isTrackingLocation && locationWatchIdRef.current !== null) {
+        navigator.geolocation.clearWatch(locationWatchIdRef.current)
+        locationWatchIdRef.current = null
+      }
+      if (!isTrackingLocation && userLocationMarkerRef.current) {
+        map.current?.removeLayer(userLocationMarkerRef.current)
+        userLocationMarkerRef.current = null
+        setUserLocation(null)
+      }
+      return
+    }
+
+    const L = (window as any).L
+    if (!L) return
+
+    // Check if geolocation is available
+    if (!navigator.geolocation) {
+      setLocationError('Geolocation is not supported by your browser')
+      setIsTrackingLocation(false)
+      return
+    }
+
+    // Start watching position
+    locationWatchIdRef.current = navigator.geolocation.watchPosition(
+      (position) => {
+        const { latitude, longitude, accuracy } = position.coords
+        const location: [number, number] = [latitude, longitude]
+        
+        setUserLocation(location)
+        setLocationError(null)
+
+        // Create or update the location marker
+        if (!userLocationMarkerRef.current) {
+          // Create a circle marker for user location
+          userLocationMarkerRef.current = L.circleMarker(location, {
+            radius: 10,
+            fillColor: '#3388ff',
+            color: '#ffffff',
+            weight: 3,
+            opacity: 1,
+            fillOpacity: 0.8,
+            className: 'user-location-marker',
+          }).addTo(map.current)
+
+          // Add accuracy circle
+          const accuracyCircle = L.circle(location, {
+            radius: accuracy,
+            fillColor: '#3388ff',
+            color: '#3388ff',
+            weight: 1,
+            opacity: 0.3,
+            fillOpacity: 0.1,
+            className: 'user-location-accuracy',
+          }).addTo(map.current)
+
+          // Store accuracy circle reference in the marker (for cleanup)
+          ;(userLocationMarkerRef.current as any).accuracyCircle = accuracyCircle
+
+          // Center map on user location (first time only)
+          map.current.setView(location, Math.max(map.current.getZoom(), 15), {
+            animate: true,
+          })
+        } else {
+          // Update existing marker position
+          userLocationMarkerRef.current.setLatLng(location)
+          // Update accuracy circle
+          if ((userLocationMarkerRef.current as any).accuracyCircle) {
+            ;(userLocationMarkerRef.current as any).accuracyCircle.setLatLng(location)
+            ;(userLocationMarkerRef.current as any).accuracyCircle.setRadius(accuracy)
+          }
+        }
+      },
+      (error) => {
+        console.error('Geolocation error:', error)
+        let errorMessage = 'Unable to get your location'
+        
+        switch (error.code) {
+          case error.PERMISSION_DENIED:
+            errorMessage = 'Location permission denied. Please enable location access in your browser settings.'
+            break
+          case error.POSITION_UNAVAILABLE:
+            errorMessage = 'Location information is unavailable.'
+            break
+          case error.TIMEOUT:
+            errorMessage = 'Location request timed out.'
+            break
+        }
+        
+        setLocationError(errorMessage)
+        setIsTrackingLocation(false)
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 0, // Always get fresh position
+      }
+    )
+
+    // Cleanup function
+    return () => {
+      if (locationWatchIdRef.current !== null) {
+        navigator.geolocation.clearWatch(locationWatchIdRef.current)
+        locationWatchIdRef.current = null
+      }
+      if (userLocationMarkerRef.current) {
+        // Remove accuracy circle if it exists
+        if ((userLocationMarkerRef.current as any).accuracyCircle) {
+          map.current?.removeLayer((userLocationMarkerRef.current as any).accuracyCircle)
+        }
+        map.current?.removeLayer(userLocationMarkerRef.current)
+        userLocationMarkerRef.current = null
+      }
+    }
+  }, [isTrackingLocation, leafletLoaded, map.current])
+
+  // Toggle location tracking
+  const toggleLocationTracking = () => {
+    if (!navigator.geolocation) {
+      setLocationError('Geolocation is not supported by your browser')
+      return
+    }
+
+    if (isTrackingLocation) {
+      // Stop tracking
+      setIsTrackingLocation(false)
+    } else {
+      // Start tracking - request permission first
+      navigator.geolocation.getCurrentPosition(
+        () => {
+          // Permission granted, start tracking
+          setIsTrackingLocation(true)
+          setLocationError(null)
+        },
+        (error) => {
+          // Permission denied or error
+          let errorMessage = 'Unable to get your location'
+          if (error.code === error.PERMISSION_DENIED) {
+            errorMessage = 'Location permission denied. Please enable location access in your browser settings.'
+          }
+          setLocationError(errorMessage)
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 5000,
+        }
+      )
+    }
+  }
 
   // Helper function to get midpoint of a line
   const getMidpoint = (coords: number[][]): [number, number] => {
@@ -940,6 +1111,53 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     <div className="relative w-full h-full">
       {/* Fullscreen Map */}
       <div ref={mapContainer} className="w-full h-full" />
+      
+      {/* Location Tracking Button */}
+      <button
+        onClick={toggleLocationTracking}
+        className={`fixed top-24 right-4 z-[1001] rounded-full p-3 shadow-lg hover:shadow-xl transition-all hover:scale-105 touch-manipulation ${
+          isTrackingLocation 
+            ? 'bg-blue-500 text-white' 
+            : 'bg-white text-gray-700 hover:bg-gray-50'
+        }`}
+        aria-label={isTrackingLocation ? 'Stop tracking location' : 'Start tracking location'}
+        title={isTrackingLocation ? 'Stop tracking location' : 'Show my location'}
+      >
+        {isTrackingLocation ? (
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
+          </svg>
+        ) : (
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
+        )}
+      </button>
+
+      {/* Location Error Message */}
+      {locationError && (
+        <div className="fixed top-32 right-4 z-[1002] bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-lg shadow-lg max-w-xs">
+          <div className="flex items-start gap-2">
+            <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div className="flex-1">
+              <p className="text-sm font-medium">{locationError}</p>
+            </div>
+            <button
+              onClick={() => setLocationError(null)}
+              className="text-red-600 hover:text-red-800"
+              aria-label="Dismiss error"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
       
       {/* Floating Sidebar Panel from Left */}
       <div
