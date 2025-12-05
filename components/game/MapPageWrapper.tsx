@@ -27,6 +27,11 @@ export default function MapPageWrapper({
   const [bottomSheetOpen, setBottomSheetOpen] = useState(false)
   const [selectedSign, setSelectedSign] = useState<Sign | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
+  const [speedData, setSpeedData] = useState<{ current: number | null; top: number; average: number }>({
+    current: null,
+    top: 0,
+    average: 0,
+  })
 
   const foundCount = signs.filter((s) => discoveredSignIds.has(s.id)).length
   const totalCount = signs.length
@@ -63,10 +68,11 @@ export default function MapPageWrapper({
           status: f.status || undefined,
         }))}
         resortName={resort.name}
+        onSpeedUpdate={setSpeedData}
       />
 
       {/* Progress Bar */}
-      <ProgressBar foundCount={foundCount} totalCount={totalCount} />
+      <ProgressBar foundCount={foundCount} totalCount={totalCount} speedData={speedData} />
 
       {/* Menu Button */}
       <button

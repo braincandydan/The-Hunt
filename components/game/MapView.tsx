@@ -16,9 +16,10 @@ interface MapViewProps {
     status?: string
   }>
   resortName?: string
+  onSpeedUpdate?: (speedData: { current: number | null; top: number; average: number }) => void
 }
 
-export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatures = [], resortName = 'Resort' }: MapViewProps) {
+export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatures = [], resortName = 'Resort', onSpeedUpdate }: MapViewProps) {
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<any>(null) // Use any to avoid type issues before Leaflet loads
   const markersRef = useRef<any[]>([])
@@ -35,6 +36,9 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   const MIN_ZOOM_FOR_LABELS = 15 // Only show labels when zoomed in enough
   const [isTrackingLocation, setIsTrackingLocation] = useState(false) // Track if location is being watched
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null) // Store user's current location
+  const [userSpeed, setUserSpeed] = useState<number | null>(null) // Store user's current speed in km/h
+  const [topSpeed, setTopSpeed] = useState<number>(0) // Store top speed in km/h
+  const [speedHistory, setSpeedHistory] = useState<number[]>([]) // Store speed history for average calculation
   const [locationError, setLocationError] = useState<string | null>(null) // Store location errors
   const userLocationMarkerRef = useRef<any>(null) // Reference to the user location marker
   const locationWatchIdRef = useRef<number | null>(null) // Reference to the watchPosition ID
@@ -469,6 +473,13 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
         map.current?.removeLayer(userLocationMarkerRef.current)
         userLocationMarkerRef.current = null
         setUserLocation(null)
+        setUserSpeed(null)
+        // Reset speed tracking when stopping
+        setTopSpeed(0)
+        setSpeedHistory([])
+        if (onSpeedUpdate) {
+          onSpeedUpdate({ current: null, top: 0, average: 0 })
+        }
       }
       return
     }
@@ -486,11 +497,29 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     // Start watching position
     locationWatchIdRef.current = navigator.geolocation.watchPosition(
       (position) => {
-        const { latitude, longitude, accuracy } = position.coords
+        const { latitude, longitude, accuracy, speed } = position.coords
         const location: [number, number] = [latitude, longitude]
         
         setUserLocation(location)
         setLocationError(null)
+
+        // Convert speed from m/s to km/h (speed can be null if not available)
+        if (speed !== null && speed !== undefined && !isNaN(speed)) {
+          const speedKmh = speed * 3.6 // Convert m/s to km/h
+          setUserSpeed(speedKmh)
+          
+          // Update speed history
+          setSpeedHistory((prevHistory) => {
+            return [...prevHistory, speedKmh].slice(-100) // Keep last 100 readings
+          })
+          
+          // Update top speed
+          setTopSpeed((prevTop) => {
+            return speedKmh > prevTop ? speedKmh : prevTop
+          })
+        } else {
+          setUserSpeed(null)
+        }
 
         // Create or update the location marker
         if (!userLocationMarkerRef.current) {
@@ -575,6 +604,21 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       }
     }
   }, [isTrackingLocation, leafletLoaded, map.current])
+
+  // Update parent component with speed data whenever it changes
+  useEffect(() => {
+    if (!onSpeedUpdate) return
+    
+    const avg = speedHistory.length > 0 
+      ? speedHistory.reduce((sum, s) => sum + s, 0) / speedHistory.length 
+      : 0
+    
+    onSpeedUpdate({ 
+      current: userSpeed, 
+      top: topSpeed, 
+      average: avg 
+    })
+  }, [userSpeed, topSpeed, speedHistory, onSpeedUpdate])
 
   // Toggle location tracking
   const toggleLocationTracking = () => {
@@ -1136,9 +1180,35 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
         )}
       </button>
 
+      {/* Speed Display Widget */}
+      {isTrackingLocation && (
+        <div className="fixed top-32 right-4 z-[1001] bg-white rounded-lg shadow-lg px-4 py-3 min-w-[120px]">
+          <div className="flex items-center gap-2">
+            <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            <div className="flex flex-col">
+              <div className="text-xs text-gray-500 font-medium">Speed</div>
+              <div className="text-lg font-bold text-gray-900">
+                {userSpeed !== null ? (
+                  <>
+                    {Math.round(userSpeed)}
+                    <span className="text-xs font-normal text-gray-500 ml-1">km/h</span>
+                  </>
+                ) : (
+                  <span className="text-sm font-normal text-gray-400">--</span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Location Error Message */}
       {locationError && (
-        <div className="fixed top-32 right-4 z-[1002] bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-lg shadow-lg max-w-xs">
+        <div className={`fixed right-4 z-[1002] bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-lg shadow-lg max-w-xs ${
+          isTrackingLocation ? 'top-44' : 'top-32'
+        }`}>
           <div className="flex items-start gap-2">
             <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
