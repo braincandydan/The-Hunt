@@ -3,6 +3,8 @@ import type { NextConfig } from 'next'
 const nextConfig: NextConfig = {
   // Disable source maps in development to avoid Turbopack warnings
   productionBrowserSourceMaps: false,
+  // Add empty turbopack config to silence warnings when using webpack
+  turbopack: {},
 }
 
 // Conditionally export based on environment
