@@ -166,7 +166,7 @@ async function streamLargeGeoJSON(filePath: string, openSkiMapResortId: string):
     // Other files have type first: {"type":"Feature","properties":{...}
     if (trimmed.startsWith('{"type":"Feature"') || 
         (trimmed.startsWith('{"properties"') && trimmed.includes('"type":"Feature"')) ||
-        (trimmed.startsWith('{"properties"') && trimmed.includes('"type":"skiArea"')) {
+        (trimmed.startsWith('{"properties"') && trimmed.includes('"type":"skiArea"'))) {
       try {
         // Parse the complete feature from the line
         // Remove trailing comma if present (GeoJSON arrays have commas between items)
