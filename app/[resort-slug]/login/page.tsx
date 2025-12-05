@@ -2,32 +2,30 @@
 
 import { useState, useEffect } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { useRouter, usePathname } from 'next/navigation'
+import { useRouter } from 'next/navigation'
 
-export default function LoginPage() {
+export default function ResortLoginPage({
+  params,
+}: {
+  params: Promise<{ 'resort-slug': string }>
+}) {
+  const [resolvedParams, setResolvedParams] = useState<{ 'resort-slug': string } | null>(null)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [resortSlug, setResortSlug] = useState<string | null>(null)
   const router = useRouter()
-  const pathname = usePathname()
   const supabase = createClient()
 
-  // Extract resort slug from URL if present (e.g., /vail-resort/login)
   useEffect(() => {
-    const pathMatch = pathname.match(/^\/([^/]+)\/login$/)
-    if (pathMatch) {
-      setResortSlug(pathMatch[1])
-    }
-  }, [pathname])
+    params.then(setResolvedParams)
+  }, [params])
 
-  const getRedirectPath = () => {
-    if (resortSlug) {
-      return `/${resortSlug}/game/map`
-    }
-    return '/'
+  if (!resolvedParams) {
+    return <div>Loading...</div>
   }
+
+  const resortSlug = resolvedParams['resort-slug']
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -42,7 +40,7 @@ export default function LoginPage() {
 
       if (error) throw error
 
-      router.push(getRedirectPath())
+      router.push(`/${resortSlug}/game/map`)
       router.refresh()
     } catch (err: any) {
       setError(err.message || 'An error occurred')
@@ -57,10 +55,8 @@ export default function LoginPage() {
 
     try {
       // Prepare state parameter with resort slug for callback
-      const state = resortSlug ? JSON.stringify({ resortSlug }) : undefined
-      const redirectTo = resortSlug 
-        ? `${window.location.origin}/auth/callback?state=${encodeURIComponent(state || '')}`
-        : `${window.location.origin}/auth/callback`
+      const state = JSON.stringify({ resortSlug })
+      const redirectTo = `${window.location.origin}/auth/callback?state=${encodeURIComponent(state)}`
 
       const { data, error } = await supabase.auth.signUp({
         email,
@@ -68,15 +64,15 @@ export default function LoginPage() {
         options: {
           emailRedirectTo: redirectTo,
           data: {
-            resort_slug: resortSlug, // Store in user metadata if needed
+            resort_slug: resortSlug,
           },
         },
       })
 
       if (error) throw error
 
-      // If we have a resort slug, associate user with resort
-      if (resortSlug && data.user) {
+      // Associate user with resort
+      if (data.user) {
         // Get resort ID
         const { data: resort } = await supabase
           .from('resorts')
@@ -173,3 +169,4 @@ export default function LoginPage() {
     </div>
   )
 }
+

@@ -16,7 +16,7 @@ export default async function SignDetailPage({
   } = await supabase.auth.getUser()
 
   if (!user) {
-    redirect('/login')
+    redirect(`/${resolvedParams['resort-slug']}/login`)
   }
 
   const { data: sign, error } = await supabase

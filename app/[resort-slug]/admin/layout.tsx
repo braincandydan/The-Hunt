@@ -17,7 +17,7 @@ export default async function AdminLayout({
   } = await supabase.auth.getUser()
 
   if (!user) {
-    redirect('/login')
+    redirect(`/${resolvedParams['resort-slug']}/login`)
   }
 
   // Get resort to check permissions
@@ -33,7 +33,7 @@ export default async function AdminLayout({
 
   // Only allow admins to access admin panel
   if (!userIsAdmin && !userIsResortAdmin) {
-    redirect(`/${resolvedParams['resort-slug']}/game`)
+    redirect(`/${resolvedParams['resort-slug']}/game/map`)
   }
 
   return (

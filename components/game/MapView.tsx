@@ -30,7 +30,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   const snowOverlayRef = useRef<any>(null) // Store the snow texture overlay
   const tileLayersRef = useRef<any[]>([]) // Store tile layers so we can update their bounds
   const [currentZoom, setCurrentZoom] = useState(13) // Track zoom level
-  const [sidebarOpen, setSidebarOpen] = useState(true) // Sidebar open/closed state
+  const [sidebarOpen, setSidebarOpen] = useState(false) // Sidebar open/closed state - hidden by default, we have our own menu
   const [leafletLoaded, setLeafletLoaded] = useState(false)
   const MIN_ZOOM_FOR_LABELS = 15 // Only show labels when zoomed in enough
 
@@ -1016,8 +1016,8 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
         </div>
       </div>
 
-      {/* Legend Bubble at Bottom of Map */}
-      <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-white rounded-lg shadow-xl p-4 z-[999] max-w-md">
+      {/* Legend Bubble at Bottom of Map - Hidden, we have our own UI */}
+      <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-white rounded-lg shadow-xl p-4 z-[999] max-w-md hidden">
         <div className="flex flex-col gap-3">
           {/* Sign Markers */}
           <div className="flex items-center gap-4 text-xs">

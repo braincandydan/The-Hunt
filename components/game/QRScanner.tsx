@@ -8,9 +8,10 @@ import { useRouter } from 'next/navigation'
 interface QRScannerProps {
   resortSlug: string
   signId: string
+  onSuccess?: () => void
 }
 
-export default function QRScanner({ resortSlug, signId }: QRScannerProps) {
+export default function QRScanner({ resortSlug, signId, onSuccess }: QRScannerProps) {
   const [scanning, setScanning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
@@ -168,11 +169,18 @@ export default function QRScanner({ resortSlug, signId }: QRScannerProps) {
 
       setSuccess(true)
       
-      // Redirect after short delay
-      setTimeout(() => {
-        router.push(`/${resortSlug}/game`)
-        router.refresh()
-      }, 1500)
+      // Call success callback if provided
+      if (onSuccess) {
+        setTimeout(() => {
+          onSuccess()
+        }, 1500)
+      } else {
+        // Fallback: redirect after short delay
+        setTimeout(() => {
+          router.push(`/${resortSlug}/game/map`)
+          router.refresh()
+        }, 1500)
+      }
     } catch (err: any) {
       setError(err.message || 'An error occurred')
     }

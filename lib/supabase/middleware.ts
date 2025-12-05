@@ -52,13 +52,21 @@ export async function updateSession(request: NextRequest) {
   const isPublicRoute = 
     pathname.startsWith('/login') ||
     pathname.startsWith('/auth') ||
-    pathname.match(/^\/[^/]+\/game/)
+    pathname.match(/^\/[^/]+\/game/) ||
+    pathname.match(/^\/[^/]+\/login/)
 
   // Only redirect to login for protected routes (admin, etc.)
   if (
     !user &&
     !isPublicRoute
   ) {
+    // Try to preserve resort slug in redirect
+    const pathMatch = pathname.match(/^\/([^/]+)/)
+    if (pathMatch && pathMatch[1] !== 'login' && pathMatch[1] !== 'auth') {
+      const url = request.nextUrl.clone()
+      url.pathname = `/${pathMatch[1]}/login`
+      return NextResponse.redirect(url)
+    }
     const url = request.nextUrl.clone()
     url.pathname = '/login'
     return NextResponse.redirect(url)
