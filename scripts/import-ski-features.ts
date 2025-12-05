@@ -116,13 +116,13 @@ async function importGeoJSON(resortId: string, filePath: string, featureType?: '
     let type: 'trail' | 'lift' | 'boundary' | 'area' = featureType || mapOpenSkiMapToFeatureType(feature.properties)
     
     // Extract name
-    const name = feature.properties.name || 
+    const name: string = feature.properties.name || 
                  feature.properties.name_en || 
                  feature.properties.id || 
                  `Feature ${features.length + 1}`
     
     // Extract difficulty for trails
-    const difficulty = type === 'trail' 
+    const difficulty: any = type === 'trail' 
       ? mapOpenSkiMapDifficulty(
           feature.properties.difficulty || 
           feature.properties.piste_difficulty ||
@@ -152,7 +152,7 @@ async function importGeoJSON(resortId: string, filePath: string, featureType?: '
     }
     
     // Create database record
-    const dbFeature = {
+    const dbFeature: any = {
       resort_id: resortId,
       name,
       type,
