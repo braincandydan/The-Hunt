@@ -1,9 +1,6 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import L from 'leaflet'
-import 'leaflet/dist/leaflet.css'
-import 'leaflet-textpath'
 import { Sign } from '@/lib/utils/types'
 
 interface MapViewProps {
@@ -21,30 +18,54 @@ interface MapViewProps {
   resortName?: string
 }
 
-// Fix Leaflet default marker icon issue with Next.js
-delete (L.Icon.Default.prototype as any)._getIconUrl
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png',
-  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png',
-  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
-})
-
 export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatures = [], resortName = 'Resort' }: MapViewProps) {
   const mapContainer = useRef<HTMLDivElement>(null)
-  const map = useRef<L.Map | null>(null)
-  const markersRef = useRef<L.Marker[]>([])
-  const layersRef = useRef<L.Layer[]>([])
-  const labelsRef = useRef<L.Marker[]>([]) // Store fallback label markers
-  const arrowsRef = useRef<L.Marker[]>([]) // Store arrow markers
-  const textpathLayersRef = useRef<Array<{ layer: L.Polyline; text: string; options: any; color: string }>>([]) // Store layers with textpath labels
-  const maskOverlayRef = useRef<L.Polygon | null>(null) // Store the grey mask overlay
-  const tileLayersRef = useRef<L.TileLayer[]>([]) // Store tile layers so we can update their bounds
+  const map = useRef<any>(null) // Use any to avoid type issues before Leaflet loads
+  const markersRef = useRef<any[]>([])
+  const layersRef = useRef<any[]>([])
+  const labelsRef = useRef<any[]>([]) // Store fallback label markers
+  const arrowsRef = useRef<any[]>([]) // Store arrow markers
+  const textpathLayersRef = useRef<Array<{ layer: any; text: string; options: any; color: string }>>([]) // Store layers with textpath labels
+  const maskOverlayRef = useRef<any>(null) // Store the grey mask overlay
+  const snowOverlayRef = useRef<any>(null) // Store the snow texture overlay
+  const tileLayersRef = useRef<any[]>([]) // Store tile layers so we can update their bounds
   const [currentZoom, setCurrentZoom] = useState(13) // Track zoom level
   const [sidebarOpen, setSidebarOpen] = useState(true) // Sidebar open/closed state
+  const [leafletLoaded, setLeafletLoaded] = useState(false)
   const MIN_ZOOM_FOR_LABELS = 15 // Only show labels when zoomed in enough
 
+  // Load Leaflet only on client side
   useEffect(() => {
-    if (!mapContainer.current || map.current) return
+    if (typeof window === 'undefined') return
+    
+    const loadLeaflet = async () => {
+      const L = (await import('leaflet')).default
+      // @ts-ignore - CSS import
+      await import('leaflet/dist/leaflet.css')
+      // @ts-ignore - leaflet-textpath doesn't have types
+      await import('leaflet-textpath')
+      
+      // Fix Leaflet default marker icon issue with Next.js
+      delete (L.Icon.Default.prototype as any)._getIconUrl
+      L.Icon.Default.mergeOptions({
+        iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png',
+        iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png',
+        shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
+      })
+      
+      // Store L in window for use in other effects
+      ;(window as any).L = L
+      setLeafletLoaded(true)
+    }
+    
+    loadLeaflet()
+  }, [])
+
+  useEffect(() => {
+    if (!mapContainer.current || map.current || !leafletLoaded || typeof window === 'undefined') return
+    
+    const L = (window as any).L
+    if (!L) return
 
     // Calculate center from signs or use default
     let center: [number, number] = [49.73283, -118.9412] // Ski resort location [lat, lng]
@@ -69,40 +90,49 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       zoom,
       maxBounds: defaultBounds, // Prevent loading tiles outside initially
       maxBoundsViscosity: 1.0, // Strictly enforce bounds (1.0 = no panning outside)
+      zoomSnap: 0, // No snapping - allows completely smooth continuous zoom
+      zoomDelta: 1.0, // Standard zoom steps for natural feel
+      wheelPxPerZoomLevel: 30, // Faster zoom response (lower = faster)
+      fadeAnimation: true, // Smooth fade transitions
+      zoomAnimation: true, // Enable zoom animations
+      zoomAnimationThreshold: 4, // Animate zoom if difference is less than 4 levels
     })
 
-    // Try OpenSkiMap first (shows ski trails), fallback to OpenStreetMap
-    const openskimap = L.tileLayer('https://tiles.openskimap.org/{z}/{x}/{y}.png', {
-      attribution: '© <a href="https://www.openskimap.org/">OpenSkiMap</a> contributors',
-      maxZoom: 18,
-      errorTileUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
-      bounds: defaultBounds, // Initially restrict to default bounds, will be updated when boundary loads
-    })
+    // Helper function to apply snowy CSS filters to tiles
+    const applySnowyStyling = (layer: any) => {
+      layer.on('tileload', (e: any) => {
+        const img = e.tile as HTMLImageElement
+        // Make it look snowy: brighten, desaturate greens, add cool tones
+        img.style.filter = 'brightness(1.25) contrast(0.95) saturate(0.35) hue-rotate(-12deg)'
+      })
+    }
 
+    // Use CartoDB Positron as primary base (light, clean, reliable)
+    const snowyBase = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, © <a href="https://carto.com/attributions">CARTO</a>',
+      maxZoom: 19,
+      bounds: defaultBounds,
+    })
+    applySnowyStyling(snowyBase)
+
+    // OpenStreetMap as fallback/alternative
     const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       maxZoom: 19,
-      bounds: defaultBounds, // Initially restrict to default bounds, will be updated when boundary loads
+      bounds: defaultBounds,
     })
+    applySnowyStyling(osm)
 
     // Store tile layers for later bounds updates
-    tileLayersRef.current = [openskimap, osm]
+    tileLayersRef.current = [snowyBase, osm]
 
-    // Add base layer (try OpenSkiMap, fallback to OSM on error)
-    openskimap.addTo(map.current)
-    
-    // If OpenSkiMap fails, switch to OSM
-    openskimap.on('tileerror', () => {
-      if (map.current && map.current.hasLayer(openskimap)) {
-        map.current.removeLayer(openskimap)
-        osm.addTo(map.current)
-      }
-    })
+    // Add snowy base layer
+    snowyBase.addTo(map.current)
 
     // Layer control for switching base maps
     const baseMaps = {
-      'Ski Map': openskimap,
-      'OpenStreetMap': osm,
+      'Snowy Map': snowyBase,
+      'Standard Map': osm,
     }
     
     L.control.layers(baseMaps).addTo(map.current)
@@ -157,7 +187,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
             // Update tile layer bounds to prevent loading tiles outside the boundary area
             // This is the key to actually preventing tile loading, not just panning
             // We need to recreate the tile layers with the new bounds option
-            const openskimapUrl = 'https://tiles.openskimap.org/{z}/{x}/{y}.png'
+            const cartoUrl = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
             const osmUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
             
             // Get which layer is currently active
@@ -165,7 +195,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
               ? tileLayersRef.current[0] 
               : tileLayersRef.current[1]
             
-            const isOpenSkiMap = currentLayer && (currentLayer as any)._url?.includes('openskimap')
+            const isCartoBase = currentLayer && (currentLayer as any)._url?.includes('cartocdn')
             
             // Remove all tile layers from map
             tileLayersRef.current.forEach((layer) => {
@@ -174,13 +204,13 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
               }
             })
             
-            // Recreate OpenSkiMap layer with bounds
-            const newOpenSkiMap = L.tileLayer(openskimapUrl, {
-              attribution: '© <a href="https://www.openskimap.org/">OpenSkiMap</a> contributors',
-              maxZoom: 18,
-              errorTileUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+            // Recreate CartoDB layer with bounds
+            const newCartoBase = L.tileLayer(cartoUrl, {
+              attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, © <a href="https://carto.com/attributions">CARTO</a>',
+              maxZoom: 19,
               bounds: expandedBounds, // Restrict tiles to boundary area
             })
+            applySnowyStyling(newCartoBase)
             
             // Recreate OSM layer with bounds
             const newOSM = L.tileLayer(osmUrl, {
@@ -188,34 +218,105 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
               maxZoom: 19,
               bounds: expandedBounds, // Restrict tiles to boundary area
             })
+            applySnowyStyling(newOSM)
             
             // Update refs
-            tileLayersRef.current = [newOpenSkiMap, newOSM]
-            
-            // Add error handler for OpenSkiMap
-            newOpenSkiMap.on('tileerror', () => {
-              if (map.current && map.current.hasLayer(newOpenSkiMap)) {
-                map.current.removeLayer(newOpenSkiMap)
-                newOSM.addTo(map.current)
-              }
-            })
+            tileLayersRef.current = [newCartoBase, newOSM]
             
             // Add the appropriate layer based on what was active before
-            if (isOpenSkiMap) {
-              newOpenSkiMap.addTo(map.current)
+            if (isCartoBase) {
+              newCartoBase.addTo(map.current)
             } else {
               newOSM.addTo(map.current)
+            }
+            
+            // Add snow texture overlay for game-like feel
+            try {
+              // Remove existing snow overlay if any
+              if (snowOverlayRef.current && map.current.hasLayer(snowOverlayRef.current)) {
+                map.current.removeLayer(snowOverlayRef.current)
+              }
+              
+              // Create snow texture pattern (SVG)
+              const snowPattern = `
+                <svg width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">
+                  <defs>
+                    <pattern id="snowPattern" x="0" y="0" width="200" height="200" patternUnits="userSpaceOnUse">
+                      <circle cx="30" cy="40" r="1.5" fill="white" opacity="0.25"/>
+                      <circle cx="80" cy="20" r="1" fill="white" opacity="0.2"/>
+                      <circle cx="120" cy="60" r="1.2" fill="white" opacity="0.22"/>
+                      <circle cx="50" cy="100" r="1" fill="white" opacity="0.2"/>
+                      <circle cx="150" cy="80" r="1.3" fill="white" opacity="0.23"/>
+                      <circle cx="180" cy="140" r="1" fill="white" opacity="0.2"/>
+                      <circle cx="100" cy="160" r="1.1" fill="white" opacity="0.21"/>
+                      <circle cx="20" cy="180" r="1.2" fill="white" opacity="0.22"/>
+                    </pattern>
+                  </defs>
+                  <rect width="100%" height="100%" fill="url(#snowPattern)"/>
+                </svg>
+              `
+              
+              const dataUrl = 'data:image/svg+xml;base64,' + btoa(snowPattern)
+              
+              const snowOverlay = L.imageOverlay(dataUrl, expandedBounds, {
+                opacity: 0.12,
+                interactive: false,
+                zIndex: 100, // Above tiles, below markers
+              })
+              
+              snowOverlay.addTo(map.current)
+              snowOverlayRef.current = snowOverlay
+            } catch (snowError) {
+              console.warn('Could not create snow overlay:', snowError)
             }
             
             // Note: Layer control will continue to work with the new layers
             // The layers themselves are replaced but the control references will update automatically
             
-            // Optionally set min zoom to prevent zooming out too far
-            // This ensures the boundary area is always visible
-            const minZoom = map.current.getBoundsZoom(expandedBounds, true)
-            if (minZoom < map.current.getMinZoom()) {
-              map.current.setMinZoom(Math.max(minZoom - 1, 10)) // Allow slight zoom out but not too much
+            // Set min zoom to prevent zooming out beyond the visible boundary area
+            // Calculate the zoom level needed to fit the expanded bounds in the viewport
+            // Using false means no padding - this ensures users can't zoom out to see the dark overlay
+            const calculateMinZoom = () => {
+              if (!map.current) return 10 // fallback
+              // Recalculate based on current map size to ensure accuracy
+              return map.current.getBoundsZoom(expandedBounds, false)
             }
+            
+            const minZoomForBounds = calculateMinZoom()
+            // Set minZoom to exactly match the required zoom to prevent seeing dark overlay area
+            map.current.setMinZoom(minZoomForBounds)
+            
+            // Also ensure current zoom doesn't go below the minimum (in case user zoomed out before boundary loaded)
+            const currentZoomLevel = map.current.getZoom()
+            if (currentZoomLevel < minZoomForBounds) {
+              map.current.setZoom(minZoomForBounds)
+            }
+            
+            // Add zoom event listener to enforce minimum zoom and prevent seeing dark overlay
+            const enforceMinZoom = () => {
+              if (map.current) {
+                const currentMinZoom = calculateMinZoom()
+                const currentZoom = map.current.getZoom()
+                // Update minZoom in case map was resized
+                if (map.current.getMinZoom() !== currentMinZoom) {
+                  map.current.setMinZoom(currentMinZoom)
+                }
+                // Enforce minimum zoom - prevent zooming out beyond the dark overlay
+                if (currentZoom < currentMinZoom) {
+                  map.current.setZoom(currentMinZoom)
+                }
+              }
+            }
+            
+            // Listen to zoom events to prevent zooming out too far
+            map.current.on('zoomend', enforceMinZoom)
+            map.current.on('zoom', enforceMinZoom)
+            // Also enforce on resize in case map container size changes
+            map.current.on('resize', () => {
+              const newMinZoom = calculateMinZoom()
+              map.current?.setMinZoom(newMinZoom)
+              enforceMinZoom()
+            })
             
             // Create a grey mask overlay for areas outside the boundary
             // We'll create a polygon covering the expanded bounds with the boundary as a hole
@@ -236,19 +337,22 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
               }
               
               if (boundaryCoords.length > 0) {
-                // Create outer rectangle covering expanded bounds
-                const outerRect: [number, number][] = [
-                  [expandedSW.lat, expandedSW.lng],
-                  [expandedNE.lat, expandedSW.lng],
-                  [expandedNE.lat, expandedNE.lng],
-                  [expandedSW.lat, expandedNE.lng],
-                  [expandedSW.lat, expandedSW.lng], // Close the polygon
+                // Create outer rectangle covering the ENTIRE WORLD
+                // This ensures ALL areas outside the boundary are the same dark grey color, no matter how far zoomed out
+                // Using world bounds: -90 to 90 lat, -180 to 180 lng
+                const worldRect: [number, number][] = [
+                  [-90, -180],  // Southwest corner of the world
+                  [90, -180],   // Northwest corner
+                  [90, 180],    // Northeast corner
+                  [-90, 180],   // Southeast corner
+                  [-90, -180],  // Close the polygon
                 ]
                 
-                // Create polygon with hole: outer ring is the rectangle, inner ring is the boundary
+                // Create polygon with hole: outer ring covers entire world, inner ring is the boundary
                 // Leaflet uses nested arrays: [[outer ring], [inner ring (hole)]]
-                const maskPolygon = L.polygon([outerRect, boundaryCoords] as [number, number][][], {
-                  fillColor: '#333333',
+                // This ensures ANY area outside the boundary, no matter how far zoomed out, is the same dark grey
+                const maskPolygon = L.polygon([worldRect, boundaryCoords] as [number, number][][], {
+                  fillColor: '#333333', // Consistent dark grey color for ALL areas outside boundary
                   fillOpacity: 0.6,
                   color: '#333333',
                   weight: 0,
@@ -283,10 +387,15 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
 
     return () => {
       // Cleanup
-      markersRef.current.forEach((marker) => marker.remove())
-      markersRef.current = []
-      layersRef.current.forEach((layer) => map.current?.removeLayer(layer))
-      layersRef.current = []
+      if (map.current) {
+        const L = (window as any).L
+        if (L) {
+          markersRef.current.forEach((marker) => marker.remove())
+          markersRef.current = []
+          layersRef.current.forEach((layer) => map.current?.removeLayer(layer))
+          layersRef.current = []
+        }
+      }
           // Remove textpath labels
           textpathLayersRef.current.forEach(({ layer }) => {
             try {
@@ -307,21 +416,28 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
             map.current.removeLayer(maskOverlayRef.current)
           }
           maskOverlayRef.current = null
+          if (snowOverlayRef.current && map.current?.hasLayer(snowOverlayRef.current)) {
+            map.current.removeLayer(snowOverlayRef.current)
+          }
+          snowOverlayRef.current = null
       if (map.current) {
         map.current.remove()
         map.current = null
       }
     }
-  }, [])
+  }, [leafletLoaded, signs, skiFeatures])
 
   useEffect(() => {
-    if (map.current) {
-      // Update markers when discoveredSignIds changes
-      markersRef.current.forEach((marker) => marker.remove())
-      markersRef.current = []
-      addMarkers()
+    if (map.current && leafletLoaded && typeof window !== 'undefined') {
+      const L = (window as any).L
+      if (L) {
+        // Update markers when discoveredSignIds changes
+        markersRef.current.forEach((marker) => marker.remove())
+        markersRef.current = []
+        addMarkers()
+      }
     }
-  }, [discoveredSignIds])
+  }, [discoveredSignIds, leafletLoaded])
 
   // Helper function to get midpoint of a line
   const getMidpoint = (coords: number[][]): [number, number] => {
@@ -398,8 +514,10 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   }
 
   // Add label and directional arrows for trails
-  const addTrailLabels = (feature: any, layer: L.Layer) => {
-    if (!map.current) return
+  const addTrailLabels = (feature: any, layer: any) => {
+    if (!map.current || typeof window === 'undefined') return
+    const L = (window as any).L
+    if (!L) return
     if (feature.type !== 'trail' && feature.type !== 'lift') return
     if (!feature.name) return
 
@@ -417,7 +535,8 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     if (layer instanceof L.Polyline) {
       const textpathOptions = {
         repeat: false,
-        offset: 5,
+        center: true, // Center the text along the path
+        offset: 0, // No additional offset when centering
         attributes: {
           fill: labelColor,
           'font-weight': '600',
@@ -452,54 +571,48 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
         console.log('TextPath not available, using fallback labels')
       }
       
-      // Fallback: create multiple labels along the path
-      const segmentCount = Math.min(3, Math.floor(coords.length / 10))
-      if (segmentCount > 0) {
-        const segmentLength = Math.floor(coords.length / (segmentCount + 1))
-        for (let i = 1; i <= segmentCount; i++) {
-          const pos = i * segmentLength
-          if (pos < coords.length) {
-            const labelPoint: [number, number] = [coords[pos][1], coords[pos][0]]
-            
-            // Calculate angle for text rotation
-            let bearing = 0
-            if (pos < coords.length - 1) {
-              const point1: [number, number] = [coords[pos][1], coords[pos][0]]
-              const point2: [number, number] = [coords[pos + 1][1], coords[pos + 1][0]]
-              bearing = getBearing(point1, point2)
-            }
-            
-            const labelIcon = L.divIcon({
-              className: 'trail-label',
-              html: `
-                <div style="
-                  transform: rotate(${bearing}deg);
-                  font-weight: 600;
-                  font-size: 12px;
-                  color: ${labelColor};
-                  text-shadow: 1px 1px 2px rgba(255,255,255,0.9), -1px -1px 2px rgba(255,255,255,0.9);
-                  white-space: nowrap;
-                  pointer-events: none;
-                ">${feature.name}</div>
-              `,
-              iconSize: [120, 20],
-              iconAnchor: [60, 10],
-            })
-
-            const labelMarker = L.marker(labelPoint, { 
-              icon: labelIcon,
-              interactive: false,
-              keyboard: false,
-            })
-            
-            // Only add to map if zoomed in enough
-            if (currentZoom >= MIN_ZOOM_FOR_LABELS && map.current) {
-              labelMarker.addTo(map.current)
-            }
-            
-            labelsRef.current.push(labelMarker)
-          }
+      // Fallback: create label at the center of the path
+      const midIndex = Math.floor(coords.length / 2)
+      if (midIndex < coords.length) {
+        const labelPoint: [number, number] = [coords[midIndex][1], coords[midIndex][0]]
+        
+        // Calculate angle for text rotation
+        let bearing = 0
+        if (midIndex < coords.length - 1) {
+          const point1: [number, number] = [coords[midIndex][1], coords[midIndex][0]]
+          const point2: [number, number] = [coords[midIndex + 1][1], coords[midIndex + 1][0]]
+          bearing = getBearing(point1, point2)
         }
+        
+        const labelIcon = L.divIcon({
+          className: 'trail-label',
+          html: `
+            <div style="
+              transform: rotate(${bearing}deg);
+              font-weight: 600;
+              font-size: 12px;
+              color: ${labelColor};
+              text-shadow: 1px 1px 2px rgba(255,255,255,0.9), -1px -1px 2px rgba(255,255,255,0.9);
+              white-space: nowrap;
+              pointer-events: none;
+            ">${feature.name}</div>
+          `,
+          iconSize: [120, 20],
+          iconAnchor: [60, 10],
+        })
+
+        const labelMarker = L.marker(labelPoint, { 
+          icon: labelIcon,
+          interactive: false,
+          keyboard: false,
+        })
+        
+        // Only add to map if zoomed in enough
+        if (currentZoom >= MIN_ZOOM_FOR_LABELS && map.current) {
+          labelMarker.addTo(map.current)
+        }
+        
+        labelsRef.current.push(labelMarker)
       }
     }
 
@@ -589,7 +702,9 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   }, [skiFeatures, currentZoom])
 
   const addMarkers = () => {
-    if (!map.current) return
+    if (!map.current || typeof window === 'undefined') return
+    const L = (window as any).L
+    if (!L) return
 
     signs.forEach((sign) => {
       const isFound = discoveredSignIds.has(sign.id)
@@ -660,7 +775,9 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   }
 
   const addSkiFeatures = () => {
-    if (!map.current || skiFeatures.length === 0) return
+    if (!map.current || skiFeatures.length === 0 || typeof window === 'undefined') return
+    const L = (window as any).L
+    if (!L) return
 
     skiFeatures.forEach((feature) => {
       try {

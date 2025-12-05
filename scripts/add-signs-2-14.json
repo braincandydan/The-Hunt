@@ -1,0 +1,120 @@
+[
+  {
+    "name": "Sign 2",
+    "description": "A sign with a view of the summit",
+    "hint": "Look for the highest point where you can see the entire valley below. This sign is at the peak where eagles dare to fly!",
+    "lat": 49.7485,
+    "lng": -118.9620,
+    "difficulty": "medium",
+    "order_index": 2
+  },
+  {
+    "name": "Sign 3",
+    "description": "Hidden among the trees",
+    "hint": "Where the forest meets the slopes, look for a sign nestled between the pines. The trees whisper secrets to those who listen!",
+    "lat": 49.7320,
+    "lng": -118.9450,
+    "difficulty": "easy",
+    "order_index": 3
+  },
+  {
+    "name": "Sign 4",
+    "description": "Near the chairlift",
+    "hint": "Find the sign where skiers queue up for their next adventure. It's right where the lift takes you higher!",
+    "lat": 49.7380,
+    "lng": -118.9280,
+    "difficulty": "easy",
+    "order_index": 4
+  },
+  {
+    "name": "Sign 5",
+    "description": "In the powder bowl area",
+    "hint": "Deep in the powder bowl where fresh tracks are made. Look for the sign where the snow is always deepest!",
+    "lat": 49.7420,
+    "lng": -118.9500,
+    "difficulty": "hard",
+    "order_index": 5
+  },
+  {
+    "name": "Sign 6",
+    "description": "Halfway up the mountain",
+    "hint": "Perfect spot to catch your breath! This sign marks the midpoint where you're halfway to the top and halfway to the bottom.",
+    "lat": 49.7250,
+    "lng": -118.9200,
+    "difficulty": "medium",
+    "order_index": 6
+  },
+  {
+    "name": "Sign 7",
+    "description": "At the backcountry access point",
+    "hint": "Where the groomed trails end and adventure begins. This sign guards the gateway to untracked terrain!",
+    "lat": 49.7350,
+    "lng": -118.9750,
+    "difficulty": "hard",
+    "order_index": 7
+  },
+  {
+    "name": "Sign 8",
+    "description": "On the beginner slope",
+    "hint": "Even beginners can find this one! Look for the sign where new skiers learn to make their first turns.",
+    "lat": 49.7180,
+    "lng": -118.9350,
+    "difficulty": "easy",
+    "order_index": 8
+  },
+  {
+    "name": "Sign 9",
+    "description": "Along the ridge line",
+    "hint": "Follow the ridge where the wind always blows. This sign is perched on the edge where you can see both sides of the mountain!",
+    "lat": 49.7500,
+    "lng": -118.9680,
+    "difficulty": "hard",
+    "order_index": 9
+  },
+  {
+    "name": "Sign 10",
+    "description": "In the gladed area",
+    "hint": "Hidden in the trees where powder stays fresh longest. Look for the sign among the glades where tree skiing is at its finest!",
+    "lat": 49.7290,
+    "lng": -118.9550,
+    "difficulty": "medium",
+    "order_index": 10
+  },
+  {
+    "name": "Sign 11",
+    "description": "Near the base area",
+    "hint": "Where your adventure begins! This sign is close to where you first step onto the mountain.",
+    "lat": 49.7200,
+    "lng": -118.9180,
+    "difficulty": "easy",
+    "order_index": 11
+  },
+  {
+    "name": "Sign 12",
+    "description": "On the steepest run",
+    "hint": "For expert skiers only! This sign marks one of the most challenging slopes on the mountain. Are you brave enough?",
+    "lat": 49.7440,
+    "lng": -118.9600,
+    "difficulty": "hard",
+    "order_index": 12
+  },
+  {
+    "name": "Sign 13",
+    "description": "Best sunset viewing spot",
+    "hint": "Where the day ends in golden glory! This sign is at the perfect spot to watch the sun set over the mountains.",
+    "lat": 49.7460,
+    "lng": -118.9520,
+    "difficulty": "medium",
+    "order_index": 13
+  },
+  {
+    "name": "Sign 14",
+    "description": "In a hidden valley",
+    "hint": "Off the beaten path! This sign is tucked away in a hidden hollow that only the most curious explorers find.",
+    "lat": 49.7270,
+    "lng": -118.9400,
+    "difficulty": "medium",
+    "order_index": 14
+  }
+]
+
