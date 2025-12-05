@@ -27,6 +27,12 @@ yarn-error.log*
 
 # local env files
 .env*.local
+
+# Large GeoJSON data files (reference data - too large for GitHub)
+docs/*.geojson
+docs/ski_areas.geojson
+docs/lifts.geojson
+docs/runs.geojson
 .env
 
 # vercel
