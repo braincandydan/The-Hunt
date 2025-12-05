@@ -54,7 +54,14 @@ export default function MapPageWrapper({
         resortSlug={resortSlug}
         signs={signs}
         discoveredSignIds={discoveredSignIds}
-        skiFeatures={skiFeatures}
+        skiFeatures={skiFeatures.map(f => ({
+          id: f.id,
+          name: f.name,
+          type: f.type,
+          difficulty: f.difficulty || undefined,
+          geometry: f.geometry,
+          status: f.status || undefined,
+        }))}
         resortName={resort.name}
       />
 
