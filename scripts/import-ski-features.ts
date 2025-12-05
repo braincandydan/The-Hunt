@@ -57,7 +57,7 @@ interface GeoJSONFeatureCollection {
   features: GeoJSONFeature[]
 }
 
-function mapOpenSkiMapToFeatureType(properties: any): 'trail' | 'lift' | 'boundary' | 'area' {
+function mapOpenSkiMapToFeatureType(properties: any, geometryType?: string): 'trail' | 'lift' | 'boundary' | 'area' {
   // OpenSkiMap uses different property names
   if (properties.type === 'skiArea' || properties.type === 'area') {
     return 'area'
