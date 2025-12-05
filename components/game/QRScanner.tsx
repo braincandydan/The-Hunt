@@ -93,9 +93,39 @@ export default function QRScanner({ resortSlug, signId, onSuccess }: QRScannerPr
         throw new Error('Sign not found')
       }
 
+      // Normalize QR codes (trim whitespace)
+      const scannedCode = qrCode.trim()
+      const storedCode = sign.qr_code.trim()
+      
+      // Extract UUID from scanned code if it's a URL
+      // QR codes might be encoded as URLs like "https://example.com/sign/{uuid}" or just the UUID
+      let extractedCode = scannedCode
+      
+      // Try to extract UUID from URL if present
+      const uuidMatch = scannedCode.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)
+      if (uuidMatch) {
+        extractedCode = uuidMatch[0]
+      }
+      
+      // Debug logging
+      console.log('Scanned QR code (raw):', scannedCode)
+      console.log('Extracted code:', extractedCode)
+      console.log('Stored QR code:', storedCode)
+      
+      // Compare (case-insensitive for UUIDs)
+      const normalizedScanned = extractedCode.toLowerCase()
+      const normalizedStored = storedCode.toLowerCase()
+      
       // Verify QR code matches
-      if (sign.qr_code !== qrCode) {
-        setError('Invalid QR code. Please scan the correct sign.')
+      if (normalizedStored !== normalizedScanned) {
+        setError(`Invalid QR code. Please scan the correct sign.`)
+        console.error('QR code mismatch:', {
+          scanned: scannedCode,
+          extracted: extractedCode,
+          stored: storedCode,
+          normalizedScanned,
+          normalizedStored
+        })
         return
       }
 
