@@ -295,7 +295,7 @@ async function importGeoJSON(
     }
     
     // Create database record
-    const dbFeature = {
+    const dbFeature: any = {
       resort_id: dbResortId,
       name,
       type,

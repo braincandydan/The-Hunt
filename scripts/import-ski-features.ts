@@ -113,7 +113,7 @@ async function importGeoJSON(resortId: string, filePath: string, featureType?: '
   
   for (const feature of geoJson.features) {
     // Determine feature type
-    let type: 'trail' | 'lift' | 'boundary' | 'area' = featureType || mapOpenSkiMapToFeatureType(feature.properties, feature.geometry.type)
+    let type: 'trail' | 'lift' | 'boundary' | 'area' = featureType || mapOpenSkiMapToFeatureType(feature.properties)
     
     // Extract name
     const name = feature.properties.name || 
