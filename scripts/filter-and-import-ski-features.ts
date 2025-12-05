@@ -258,10 +258,10 @@ async function importGeoJSON(
     let type: 'trail' | 'lift' | 'boundary' | 'area' = featureType || mapOpenSkiMapToFeatureType(feature.properties, feature.geometry.type)
     
     // Extract name
-    const name = feature.properties.name || 
-                 feature.properties.name_en || 
-                 feature.properties.id || 
-                 `Feature ${features.length + 1}`
+    const name: string = feature.properties.name || 
+                         feature.properties.name_en || 
+                         feature.properties.id || 
+                         `Feature ${features.length + 1}`
     
     // Extract difficulty for trails
     const difficulty = type === 'trail' 
