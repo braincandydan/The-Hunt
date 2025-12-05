@@ -295,17 +295,7 @@ async function importGeoJSON(
     }
     
     // Create database record
-    const dbFeature: {
-      resort_id: string
-      name: string
-      type: 'trail' | 'lift' | 'boundary' | 'area'
-      difficulty: 'green' | 'blue' | 'black' | 'double-black' | 'terrain-park' | 'other' | null
-      geometry: { type: string; coordinates: any }
-      metadata: { original_properties: any; source: string; openskimap_resort_id: string }
-      status: 'open' | 'closed' | 'groomed' | 'ungroomed'
-      active: boolean
-      order_index: number
-    } = {
+    const dbFeature = {
       resort_id: dbResortId,
       name,
       type,
