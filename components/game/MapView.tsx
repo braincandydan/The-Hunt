@@ -10,7 +10,7 @@ interface MapViewProps {
   skiFeatures?: Array<{
     id: string
     name: string
-    type: 'trail' | 'lift' | 'boundary' | 'area'
+    type: 'trail' | 'lift' | 'boundary' | 'area' | 'road'
     difficulty?: string
     geometry: any // GeoJSON geometry
     status?: string
@@ -1081,6 +1081,15 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
               baseStyle.fillOpacity = 0.2
               break
 
+            case 'road':
+              // Roads are styled as thin gray lines
+              baseStyle.color = '#6b7280' // Tailwind gray-500
+              baseStyle.fillColor = '#9ca3af' // Tailwind gray-400
+              baseStyle.weight = 2
+              baseStyle.opacity = 0.6
+              baseStyle.fillOpacity = 0
+              break
+
             default:
               baseStyle.color = '#808080'
               baseStyle.fillColor = '#d3d3d3'
@@ -1124,7 +1133,80 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
                 ${props.status ? `<p style="color: #6b7280; font-size: 14px;"><strong>Status:</strong> ${props.status}</p>` : ''}
               </div>
             `
-            layer.bindPopup(popupContent)
+            
+            // For boundary polygons, only make the outline interactive (not the fill)
+            if (props.type === 'boundary' && (feature.geometry.type === 'Polygon' || feature.geometry.type === 'MultiPolygon')) {
+              // Get the outline coordinates
+              const outlineCoords = feature.geometry.type === 'Polygon' 
+                ? feature.geometry.coordinates[0]
+                : feature.geometry.coordinates[0][0]
+              
+              if (outlineCoords) {
+                // Convert GeoJSON [lng, lat] to Leaflet [lat, lng]
+                const latLngs = outlineCoords.map((coord: number[]) => [coord[1], coord[0]]) as [number, number][]
+                
+                // Create a polyline for the outline that will be interactive
+                const outlineLayer = L.polyline(latLngs, {
+                  color: style.color || '#000000',
+                  weight: style.weight || 2,
+                  opacity: style.opacity || 0.8,
+                  dashArray: style.dashArray || '15, 10',
+                  interactive: true,
+                })
+                
+                // Bind popup to the outline only
+                outlineLayer.bindPopup(popupContent)
+                outlineLayer.addTo(map.current!)
+                layersRef.current.push(outlineLayer)
+                
+                // Make the original polygon fill non-interactive (but keep it visible)
+                ;(layer as any).options.interactive = false
+                ;(layer as any).setStyle({ interactive: false })
+              } else {
+                // Fallback: bind popup normally
+                layer.bindPopup(popupContent)
+              }
+            } 
+            // For roads, trails, and lifts (LineString/MultiLineString), create a wider invisible interaction layer
+            else if ((props.type === 'road' || props.type === 'trail' || props.type === 'lift') && 
+                     (feature.geometry.type === 'LineString' || feature.geometry.type === 'MultiLineString')) {
+              // Get coordinates for the line
+              let lineCoords: number[][][] = []
+              if (feature.geometry.type === 'LineString') {
+                lineCoords = [feature.geometry.coordinates]
+              } else {
+                lineCoords = feature.geometry.coordinates
+              }
+              
+              // Create an invisible wider interaction layer for each line segment
+              lineCoords.forEach((coords) => {
+                // Convert GeoJSON [lng, lat] to Leaflet [lat, lng]
+                const latLngs = coords.map((coord: number[]) => [coord[1], coord[0]]) as [number, number][]
+                
+                // Create an invisible wider line for easier clicking (15px wide)
+                const interactionLayer = L.polyline(latLngs, {
+                  color: 'transparent',
+                  weight: 15, // Much wider for easier clicking
+                  opacity: 0,
+                  fillOpacity: 0,
+                  interactive: true,
+                  className: 'leaflet-interactive-line', // Optional: for styling if needed
+                })
+                
+                // Bind popup to the interaction layer
+                interactionLayer.bindPopup(popupContent)
+                interactionLayer.addTo(map.current!)
+                layersRef.current.push(interactionLayer)
+              })
+              
+              // Make the original visible line non-interactive (it's just for display)
+              ;(layer as any).options.interactive = false
+              ;(layer as any).setStyle({ interactive: false })
+            } 
+            else {
+              // For other features (lifts, areas, etc.), bind popup normally
+              layer.bindPopup(popupContent)
+            }
             
             // Add labels and arrows for trails and lifts
             // Create a combined feature object with geometry and properties

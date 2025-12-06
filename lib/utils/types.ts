@@ -68,7 +68,7 @@ export interface SkiFeature {
   id: string
   resort_id: string
   name: string
-  type: 'trail' | 'lift' | 'boundary' | 'area'
+  type: 'trail' | 'lift' | 'boundary' | 'area' | 'road'
   difficulty?: 'green' | 'blue' | 'black' | 'double-black' | 'terrain-park' | 'other' | null
   geometry: any // GeoJSON geometry
   metadata?: any | null

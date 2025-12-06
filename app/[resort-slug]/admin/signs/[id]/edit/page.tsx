@@ -12,6 +12,8 @@ export default function EditSignPage() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [gettingLocation, setGettingLocation] = useState(false)
+  const [locationError, setLocationError] = useState<string | null>(null)
   
   const [formData, setFormData] = useState({
     name: '',
@@ -92,6 +94,55 @@ export default function EditSignPage() {
     }
   }
 
+  const getCurrentLocation = () => {
+    if (!navigator.geolocation) {
+      setLocationError('Geolocation is not supported by your browser')
+      return
+    }
+
+    setGettingLocation(true)
+    setLocationError(null)
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const { latitude, longitude, accuracy } = position.coords
+        setFormData({
+          ...formData,
+          lat: latitude.toFixed(8),
+          lng: longitude.toFixed(8),
+        })
+        setGettingLocation(false)
+        
+        // Show accuracy info (optional - you could display this in a tooltip or message)
+        if (accuracy) {
+          console.log(`GPS accuracy: ${accuracy.toFixed(1)} meters`)
+        }
+      },
+      (error) => {
+        setGettingLocation(false)
+        switch (error.code) {
+          case error.PERMISSION_DENIED:
+            setLocationError('Location access denied. Please enable location permissions.')
+            break
+          case error.POSITION_UNAVAILABLE:
+            setLocationError('Location information unavailable.')
+            break
+          case error.TIMEOUT:
+            setLocationError('Location request timed out. Please try again.')
+            break
+          default:
+            setLocationError('An error occurred while getting your location.')
+            break
+        }
+      },
+      {
+        enableHighAccuracy: true, // Request high accuracy (uses GPS if available)
+        timeout: 10000, // 10 second timeout
+        maximumAge: 0, // Don't use cached position
+      }
+    )
+  }
+
   if (loading) {
     return (
       <div className="px-4 py-6">
@@ -168,37 +219,76 @@ export default function EditSignPage() {
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label htmlFor="lat" className="block text-sm font-medium text-gray-700">
-              Latitude *
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <label className="block text-sm font-medium text-gray-700">
+              Location *
             </label>
-            <input
-              type="number"
-              id="lat"
-              required
-              step="any"
-              value={formData.lat}
-              onChange={(e) => setFormData({ ...formData, lat: e.target.value })}
-              className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
-              placeholder="39.8283"
-            />
+            <button
+              type="button"
+              onClick={getCurrentLocation}
+              disabled={gettingLocation}
+              className="text-sm text-indigo-600 hover:text-indigo-700 font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+            >
+              {gettingLocation ? (
+                <>
+                  <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Getting location...
+                </>
+              ) : (
+                <>
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                  </svg>
+                  Use Current Location
+                </>
+              )}
+            </button>
           </div>
-          <div>
-            <label htmlFor="lng" className="block text-sm font-medium text-gray-700">
-              Longitude *
-            </label>
-            <input
-              type="number"
-              id="lng"
-              required
-              step="any"
-              value={formData.lng}
-              onChange={(e) => setFormData({ ...formData, lng: e.target.value })}
-              className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
-              placeholder="-98.5795"
-            />
+          {locationError && (
+            <div className="mb-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
+              {locationError}
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label htmlFor="lat" className="block text-sm font-medium text-gray-700">
+                Latitude *
+              </label>
+              <input
+                type="number"
+                id="lat"
+                required
+                step="any"
+                value={formData.lat}
+                onChange={(e) => setFormData({ ...formData, lat: e.target.value })}
+                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                placeholder="39.8283"
+              />
+            </div>
+            <div>
+              <label htmlFor="lng" className="block text-sm font-medium text-gray-700">
+                Longitude *
+              </label>
+              <input
+                type="number"
+                id="lng"
+                required
+                step="any"
+                value={formData.lng}
+                onChange={(e) => setFormData({ ...formData, lng: e.target.value })}
+                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                placeholder="-98.5795"
+              />
+            </div>
           </div>
+          <p className="mt-1 text-xs text-gray-500">
+            GPS accuracy is typically 3-5 meters on mobile devices. You can fine-tune the coordinates after using your current location.
+          </p>
         </div>
 
         <div className="grid grid-cols-2 gap-4">
