@@ -1005,6 +1005,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
             type: feature.type,
             difficulty: feature.difficulty,
             status: feature.status,
+            metadata: feature.metadata || {}, // Include metadata for elevation data
           },
         }
 
@@ -1123,6 +1124,48 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
           onEachFeature: (feature: any, layer: L.Layer) => {
             // Add popup with feature info
             const props = feature.properties
+            const metadata = props.metadata || {}
+            const originalProps = metadata.original_properties || {}
+            
+            // Extract elevation data
+            let elevationInfo = ''
+            if (props.type === 'trail') {
+              // Try multiple common elevation field names
+              const elevation = originalProps.elevation || 
+                               originalProps.ele || 
+                               originalProps.elevation_max ||
+                               originalProps.elevation_min ||
+                               originalProps.height
+              
+              // If we have elevation data, display it
+              if (elevation !== undefined && elevation !== null) {
+                const elevationMeters = typeof elevation === 'number' ? elevation : parseFloat(elevation)
+                if (!isNaN(elevationMeters)) {
+                  const elevationFeet = Math.round(elevationMeters * 3.28084)
+                  elevationInfo = `<p style="color: #6b7280; font-size: 14px; margin-bottom: 4px;">
+                    <strong>Elevation:</strong> ${Math.round(elevationMeters)}m (${elevationFeet}ft)
+                  </p>`
+                }
+              } else {
+                // Try to calculate from geometry coordinates (if 3D coordinates exist)
+                const coords = feature.geometry.coordinates
+                if (coords && Array.isArray(coords)) {
+                  // For LineString, check if coordinates have Z values
+                  const flatCoords = coords.flat(2)
+                  const elevations = flatCoords.filter((_, i) => i % 3 === 2 && typeof flatCoords[i] === 'number')
+                  if (elevations.length > 0) {
+                    const maxElev = Math.max(...elevations)
+                    const minElev = Math.min(...elevations)
+                    const maxFeet = Math.round(maxElev * 3.28084)
+                    const minFeet = Math.round(minElev * 3.28084)
+                    elevationInfo = `<p style="color: #6b7280; font-size: 14px; margin-bottom: 4px;">
+                      <strong>Elevation:</strong> ${Math.round(minElev)}m - ${Math.round(maxElev)}m (${minFeet}ft - ${maxFeet}ft)
+                    </p>`
+                  }
+                }
+              }
+            }
+            
             const popupContent = `
               <div style="padding: 8px; min-width: 150px;">
                 <h3 style="font-weight: 600; margin-bottom: 4px; font-size: 16px;">${props.name}</h3>
@@ -1130,6 +1173,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
                   <strong>Type:</strong> ${props.type.charAt(0).toUpperCase() + props.type.slice(1)}
                 </p>
                 ${props.difficulty ? `<p style="color: #6b7280; font-size: 14px; margin-bottom: 4px;"><strong>Difficulty:</strong> ${props.difficulty}</p>` : ''}
+                ${elevationInfo}
                 ${props.status ? `<p style="color: #6b7280; font-size: 14px;"><strong>Status:</strong> ${props.status}</p>` : ''}
               </div>
             `
