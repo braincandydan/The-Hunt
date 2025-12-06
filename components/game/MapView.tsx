@@ -66,6 +66,11 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       // Store L in window for use in other effects
       ;(window as any).L = L
       setLeafletLoaded(true)
+      
+      // Store map instance globally for use in popup scripts
+      if (map.current) {
+        ;(window as any).currentLeafletMap = map.current
+      }
     }
     
     loadLeaflet()
@@ -990,6 +995,223 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     }
   }
 
+  // Helper function to extract elevation profile from geometry
+  const extractElevationProfile = (geometry: any): Array<{distance: number, elevation: number, lat: number, lng: number}> => {
+    const points: Array<{distance: number, elevation: number, lat: number, lng: number}> = []
+    let cumulativeDistance = 0
+    let lastPoint: [number, number, number?] | null = null
+
+    const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+      const R = 6371000 // Earth radius in meters
+      const dLat = (lat2 - lat1) * Math.PI / 180
+      const dLon = (lon2 - lon1) * Math.PI / 180
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(lat1 * Math.PI / 180) *
+          Math.cos(lat2 * Math.PI / 180) *
+          Math.sin(dLon / 2) *
+          Math.sin(dLon / 2)
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+      return R * c
+    }
+
+    const processCoordinates = (coords: any[]): void => {
+      if (!Array.isArray(coords)) return
+
+      if (coords.length >= 2 && typeof coords[0] === 'number' && typeof coords[1] === 'number') {
+        const lng = coords[0]
+        const lat = coords[1]
+        const elevation = coords.length >= 3 && typeof coords[2] === 'number' ? coords[2] : null
+
+        if (lastPoint) {
+          const distance = calculateDistance(lastPoint[1], lastPoint[0], lat, lng)
+          cumulativeDistance += distance
+        }
+
+        if (elevation !== null && elevation !== undefined) {
+          points.push({ distance: cumulativeDistance, elevation, lat, lng })
+        }
+
+        lastPoint = [lng, lat, elevation || undefined]
+      } else {
+        coords.forEach(processCoordinates)
+      }
+    }
+
+    if (geometry.type === 'LineString') {
+      processCoordinates(geometry.coordinates)
+    } else if (geometry.type === 'MultiLineString') {
+      geometry.coordinates.forEach((line: any[]) => processCoordinates(line))
+    }
+
+    return points
+  }
+
+  // Helper function to create elevation chart HTML
+  const createElevationChart = (profile: Array<{distance: number, elevation: number, lat: number, lng: number}>, featureId: string, layer: L.Layer, mapInstance: any): string => {
+    if (profile.length === 0) return ''
+
+    const width = 300
+    const height = 120
+    const padding = { top: 20, right: 20, bottom: 30, left: 50 }
+    const chartWidth = width - padding.left - padding.right
+    const chartHeight = height - padding.top - padding.bottom
+
+    const distances = profile.map(p => p.distance)
+    const elevations = profile.map(p => p.elevation)
+    const minDistance = Math.min(...distances)
+    const maxDistance = Math.max(...distances)
+    const minElevation = Math.min(...elevations)
+    const maxElevation = Math.max(...elevations)
+    const elevationRange = maxElevation - minElevation || 1
+
+    const scaleX = (distance: number) => ((distance - minDistance) / (maxDistance - minDistance || 1)) * chartWidth
+    const scaleY = (elevation: number) => chartHeight - ((elevation - minElevation) / elevationRange) * chartHeight
+
+    const pathData = profile
+      .map((point, i) => {
+        const x = scaleX(point.distance) + padding.left
+        const y = scaleY(point.elevation) + padding.top
+        return `${i === 0 ? 'M' : 'L'} ${x} ${y}`
+      })
+      .join(' ')
+
+    const uniqueId = `chart-${featureId.replace(/[^a-zA-Z0-9]/g, '-')}-${Date.now()}`
+
+    return `
+      <div style="margin-top: 12px;">
+        <div style="font-size: 11px; color: #6b7280; margin-bottom: 4px; font-weight: 500;">Elevation Profile</div>
+        <svg id="${uniqueId}"} width="${width}" height="${height}" style="border: 1px solid #e5e7eb; border-radius: 4px; cursor: crosshair;">
+          <!-- Grid lines -->
+          ${[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+            const y = padding.top + ratio * chartHeight
+            return `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="#e5e7eb" stroke-width="0.5"/>`
+          }).join('')}
+          
+          <!-- Y-axis labels -->
+          ${[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+            const elevation = minElevation + (1 - ratio) * elevationRange
+            const y = padding.top + ratio * chartHeight
+            return `<text x="${padding.left - 5}" y="${y + 4}" text-anchor="end" font-size="10" fill="#6b7280">${Math.round(elevation)}m</text>`
+          }).join('')}
+          
+          <!-- X-axis label -->
+          <text x="${width / 2}" y="${height - 5}" text-anchor="middle" font-size="10" fill="#6b7280">Distance: ${Math.round(maxDistance)}m</text>
+          
+          <!-- Gradient definition -->
+          <defs>
+            <linearGradient id="grad-${uniqueId}" x1="0%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.4"/>
+              <stop offset="100%" stop-color="#3b82f6" stop-opacity="0.1"/>
+            </linearGradient>
+          </defs>
+          
+          <!-- Fill area -->
+          <path d="${pathData} L ${width - padding.right} ${padding.top + chartHeight} L ${padding.left} ${padding.top + chartHeight} Z" fill="url(#grad-${uniqueId})"/>
+          
+          <!-- Elevation path -->
+          <path d="${pathData}" fill="none" stroke="#3b82f6" stroke-width="2"/>
+          
+          <!-- Hover indicator (initially hidden) -->
+          <g id="hover-${uniqueId}" style="display: none;">
+            <line id="line-${uniqueId}" x1="0" y1="${padding.top}" x2="0" y2="${padding.top + chartHeight}" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="4,4"/>
+            <circle id="dot-${uniqueId}" cx="0" cy="0" r="4" fill="#ef4444" stroke="white" stroke-width="2"/>
+            <g id="tooltip-${uniqueId}">
+              <rect x="0" y="0" width="80" height="30" fill="rgba(0,0,0,0.8)" rx="4"/>
+              <text id="text-elev-${uniqueId}" x="40" y="15" text-anchor="middle" font-size="10" fill="white" font-weight="bold">0m</text>
+              <text id="text-dist-${uniqueId}" x="40" y="27" text-anchor="middle" font-size="9" fill="#d1d5db">0m</text>
+            </g>
+          </g>
+        </svg>
+        <script>
+          (function() {
+            const svg = document.getElementById('${uniqueId}');
+            const hoverGroup = document.getElementById('hover-${uniqueId}');
+            const hoverLine = document.getElementById('line-${uniqueId}');
+            const hoverDot = document.getElementById('dot-${uniqueId}');
+            const tooltip = document.getElementById('tooltip-${uniqueId}');
+            const textElev = document.getElementById('text-elev-${uniqueId}');
+            const textDist = document.getElementById('text-dist-${uniqueId}');
+            
+            const profile = ${JSON.stringify(profile)};
+            const padding = ${JSON.stringify(padding)};
+            const chartWidth = ${chartWidth};
+            const chartHeight = ${chartHeight};
+            const minDistance = ${minDistance};
+            const maxDistance = ${maxDistance};
+            const minElevation = ${minElevation};
+            const maxElevation = ${maxElevation};
+            const elevationRange = ${elevationRange};
+            
+            const scaleX = (d) => ((d - minDistance) / (maxDistance - minDistance || 1)) * chartWidth;
+            const scaleY = (e) => chartHeight - ((e - minElevation) / elevationRange) * chartHeight;
+            
+            let highlightMarker = null;
+            
+            svg.addEventListener('mousemove', (e) => {
+              const rect = svg.getBoundingClientRect();
+              const x = e.clientX - rect.left - padding.left;
+              
+              let closestIndex = 0;
+              let minDist = Infinity;
+              
+              profile.forEach((point, i) => {
+                const pointX = scaleX(point.distance);
+                const dist = Math.abs(pointX - x);
+                if (dist < minDist) {
+                  minDist = dist;
+                  closestIndex = i;
+                }
+              });
+              
+              const point = profile[closestIndex];
+              const xPos = scaleX(point.distance) + padding.left;
+              const yPos = scaleY(point.elevation) + padding.top;
+              
+              hoverGroup.style.display = 'block';
+              hoverLine.setAttribute('x1', xPos);
+              hoverLine.setAttribute('x2', xPos);
+              hoverDot.setAttribute('cx', xPos);
+              hoverDot.setAttribute('cy', yPos);
+              
+              textElev.textContent = Math.round(point.elevation) + 'm';
+              textDist.textContent = Math.round(point.distance) + 'm';
+              
+              const tooltipX = xPos - 40;
+              const tooltipY = yPos - 35;
+              tooltip.setAttribute('transform', \`translate(\${tooltipX}, \${tooltipY})\`);
+              
+              // Highlight point on map
+              if (highlightMarker) {
+                highlightMarker.remove();
+              }
+              const L = window.L;
+              const mapInstance = window.currentLeafletMap;
+              if (L && mapInstance) {
+                highlightMarker = L.marker([point.lat, point.lng], {
+                  icon: L.divIcon({
+                    className: 'elevation-highlight',
+                    html: '<div style="width: 12px; height: 12px; background: #ef4444; border: 2px solid white; border-radius: 50%; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>',
+                    iconSize: [12, 12],
+                    iconAnchor: [6, 6]
+                  })
+                }).addTo(mapInstance);
+              }
+            });
+            
+            svg.addEventListener('mouseleave', () => {
+              hoverGroup.style.display = 'none';
+              if (highlightMarker) {
+                highlightMarker.remove();
+                highlightMarker = null;
+              }
+            });
+          })();
+        </script>
+      </div>
+    `
+  }
+
   const addSkiFeatures = () => {
     if (!map.current || skiFeatures.length === 0 || typeof window === 'undefined') return
     const L = (window as any).L
@@ -1128,39 +1350,40 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
             const metadata = props.metadata || {}
             const originalProps = metadata.original_properties || {}
             
-            // Extract elevation data
+            // Extract elevation data and create profile
             let elevationInfo = ''
+            let elevationChart = ''
             if (props.type === 'trail') {
-              // Try multiple common elevation field names
-              const elevation = originalProps.elevation || 
-                               originalProps.ele || 
-                               originalProps.elevation_max ||
-                               originalProps.elevation_min ||
-                               originalProps.height
+              // Extract elevation profile from geometry
+              const profile = extractElevationProfile(feature.geometry)
               
-              // If we have elevation data, display it
-              if (elevation !== undefined && elevation !== null) {
-                const elevationMeters = typeof elevation === 'number' ? elevation : parseFloat(elevation)
-                if (!isNaN(elevationMeters)) {
-                  const elevationFeet = Math.round(elevationMeters * 3.28084)
-                  elevationInfo = `<p style="color: #6b7280; font-size: 14px; margin-bottom: 4px;">
-                    <strong>Elevation:</strong> ${Math.round(elevationMeters)}m (${elevationFeet}ft)
-                  </p>`
-                }
+              if (profile.length > 0) {
+                // Create elevation chart
+                elevationChart = createElevationChart(profile, feature.id, layer, map.current)
+                
+                // Show elevation range
+                const elevations = profile.map(p => p.elevation)
+                const maxElev = Math.max(...elevations)
+                const minElev = Math.min(...elevations)
+                const maxFeet = Math.round(maxElev * 3.28084)
+                const minFeet = Math.round(minElev * 3.28084)
+                elevationInfo = `<p style="color: #6b7280; font-size: 14px; margin-bottom: 4px;">
+                  <strong>Elevation:</strong> ${Math.round(minElev)}m - ${Math.round(maxElev)}m (${minFeet}ft - ${maxFeet}ft)
+                </p>`
               } else {
-                // Try to calculate from geometry coordinates (if 3D coordinates exist)
-                const coords = feature.geometry.coordinates
-                if (coords && Array.isArray(coords)) {
-                  // For LineString, check if coordinates have Z values
-                  const flatCoords = coords.flat(2)
-                  const elevations = flatCoords.filter((_, i) => i % 3 === 2 && typeof flatCoords[i] === 'number')
-                  if (elevations.length > 0) {
-                    const maxElev = Math.max(...elevations)
-                    const minElev = Math.min(...elevations)
-                    const maxFeet = Math.round(maxElev * 3.28084)
-                    const minFeet = Math.round(minElev * 3.28084)
+                // Try metadata elevation fields as fallback
+                const elevation = originalProps.elevation || 
+                                 originalProps.ele || 
+                                 originalProps.elevation_max ||
+                                 originalProps.elevation_min ||
+                                 originalProps.height
+                
+                if (elevation !== undefined && elevation !== null) {
+                  const elevationMeters = typeof elevation === 'number' ? elevation : parseFloat(elevation)
+                  if (!isNaN(elevationMeters)) {
+                    const elevationFeet = Math.round(elevationMeters * 3.28084)
                     elevationInfo = `<p style="color: #6b7280; font-size: 14px; margin-bottom: 4px;">
-                      <strong>Elevation:</strong> ${Math.round(minElev)}m - ${Math.round(maxElev)}m (${minFeet}ft - ${maxFeet}ft)
+                      <strong>Elevation:</strong> ${Math.round(elevationMeters)}m (${elevationFeet}ft)
                     </p>`
                   }
                 }
@@ -1175,6 +1398,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
                 </p>
                 ${props.difficulty ? `<p style="color: #6b7280; font-size: 14px; margin-bottom: 4px;"><strong>Difficulty:</strong> ${props.difficulty}</p>` : ''}
                 ${elevationInfo}
+                ${elevationChart}
                 ${props.status ? `<p style="color: #6b7280; font-size: 14px;"><strong>Status:</strong> ${props.status}</p>` : ''}
               </div>
             `
