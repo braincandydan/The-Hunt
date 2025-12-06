@@ -1083,10 +1083,10 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
 
     const uniqueId = `chart-${featureId.replace(/[^a-zA-Z0-9]/g, '-')}-${Date.now()}`
 
-    return `
+    const chartHtml = `
       <div style="margin-top: 12px;">
         <div style="font-size: 11px; color: #6b7280; margin-bottom: 4px; font-weight: 500;">Elevation Profile</div>
-        <svg id="${uniqueId}"} width="${width}" height="${height}" style="border: 1px solid #e5e7eb; border-radius: 4px; cursor: crosshair;">
+        <svg id="${uniqueId}" width="${width}" height="${height}" style="border: 1px solid #e5e7eb; border-radius: 4px; cursor: crosshair;" data-profile='${JSON.stringify(profile)}' data-padding='${JSON.stringify(padding)}' data-chart-width="${chartWidth}" data-chart-height="${chartHeight}" data-min-distance="${minDistance}" data-max-distance="${maxDistance}" data-min-elevation="${minElevation}" data-max-elevation="${maxElevation}" data-elevation-range="${elevationRange}">
           <!-- Grid lines -->
           ${[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
             const y = padding.top + ratio * chartHeight
@@ -1128,93 +1128,106 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
             </g>
           </g>
         </svg>
-        <script>
-          (function() {
-            const svg = document.getElementById('${uniqueId}');
-            const hoverGroup = document.getElementById('hover-${uniqueId}');
-            const hoverLine = document.getElementById('line-${uniqueId}');
-            const hoverDot = document.getElementById('dot-${uniqueId}');
-            const tooltip = document.getElementById('tooltip-${uniqueId}');
-            const textElev = document.getElementById('text-elev-${uniqueId}');
-            const textDist = document.getElementById('text-dist-${uniqueId}');
-            
-            const profile = ${JSON.stringify(profile)};
-            const padding = ${JSON.stringify(padding)};
-            const chartWidth = ${chartWidth};
-            const chartHeight = ${chartHeight};
-            const minDistance = ${minDistance};
-            const maxDistance = ${maxDistance};
-            const minElevation = ${minElevation};
-            const maxElevation = ${maxElevation};
-            const elevationRange = ${elevationRange};
-            
-            const scaleX = (d) => ((d - minDistance) / (maxDistance - minDistance || 1)) * chartWidth;
-            const scaleY = (e) => chartHeight - ((e - minElevation) / elevationRange) * chartHeight;
-            
-            let highlightMarker = null;
-            
-            svg.addEventListener('mousemove', (e) => {
-              const rect = svg.getBoundingClientRect();
-              const x = e.clientX - rect.left - padding.left;
-              
-              let closestIndex = 0;
-              let minDist = Infinity;
-              
-              profile.forEach((point, i) => {
-                const pointX = scaleX(point.distance);
-                const dist = Math.abs(pointX - x);
-                if (dist < minDist) {
-                  minDist = dist;
-                  closestIndex = i;
-                }
-              });
-              
-              const point = profile[closestIndex];
-              const xPos = scaleX(point.distance) + padding.left;
-              const yPos = scaleY(point.elevation) + padding.top;
-              
-              hoverGroup.style.display = 'block';
-              hoverLine.setAttribute('x1', xPos);
-              hoverLine.setAttribute('x2', xPos);
-              hoverDot.setAttribute('cx', xPos);
-              hoverDot.setAttribute('cy', yPos);
-              
-              textElev.textContent = Math.round(point.elevation) + 'm';
-              textDist.textContent = Math.round(point.distance) + 'm';
-              
-              const tooltipX = xPos - 40;
-              const tooltipY = yPos - 35;
-              tooltip.setAttribute('transform', \`translate(\${tooltipX}, \${tooltipY})\`);
-              
-              // Highlight point on map
-              if (highlightMarker) {
-                highlightMarker.remove();
-              }
-              const L = window.L;
-              const mapInstance = window.currentLeafletMap;
-              if (L && mapInstance) {
-                highlightMarker = L.marker([point.lat, point.lng], {
-                  icon: L.divIcon({
-                    className: 'elevation-highlight',
-                    html: '<div style="width: 12px; height: 12px; background: #ef4444; border: 2px solid white; border-radius: 50%; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>',
-                    iconSize: [12, 12],
-                    iconAnchor: [6, 6]
-                  })
-                }).addTo(mapInstance);
-              }
-            });
-            
-            svg.addEventListener('mouseleave', () => {
-              hoverGroup.style.display = 'none';
-              if (highlightMarker) {
-                highlightMarker.remove();
-                highlightMarker = null;
-              }
-            });
-          })();
-        </script>
       </div>
     `
+    
+    // Attach event listeners when popup opens (using Leaflet popupopen event)
+    if (layer && (layer as any).on) {
+      (layer as any).once('popupopen', () => {
+        setTimeout(() => {
+          const svg = document.getElementById(uniqueId)
+          if (!svg) return
+          
+          const profileData = JSON.parse(svg.getAttribute('data-profile') || '[]')
+          const paddingData = JSON.parse(svg.getAttribute('data-padding') || '{}')
+          const chartWidth = parseFloat(svg.getAttribute('data-chart-width') || '0')
+          const chartHeight = parseFloat(svg.getAttribute('data-chart-height') || '0')
+          const minDistance = parseFloat(svg.getAttribute('data-min-distance') || '0')
+          const maxDistance = parseFloat(svg.getAttribute('data-max-distance') || '0')
+          const minElevation = parseFloat(svg.getAttribute('data-min-elevation') || '0')
+          const maxElevation = parseFloat(svg.getAttribute('data-max-elevation') || '0')
+          const elevationRange = parseFloat(svg.getAttribute('data-elevation-range') || '1')
+          
+          const hoverGroup = document.getElementById(`hover-${uniqueId}`)
+          const hoverLine = document.getElementById(`line-${uniqueId}`)
+          const hoverDot = document.getElementById(`dot-${uniqueId}`)
+          const tooltip = document.getElementById(`tooltip-${uniqueId}`)
+          const textElev = document.getElementById(`text-elev-${uniqueId}`)
+          const textDist = document.getElementById(`text-dist-${uniqueId}`)
+          
+          if (!hoverGroup || !hoverLine || !hoverDot || !tooltip || !textElev || !textDist) return
+          
+          const scaleX = (d: number) => ((d - minDistance) / (maxDistance - minDistance || 1)) * chartWidth
+          const scaleY = (e: number) => chartHeight - ((e - minElevation) / elevationRange) * chartHeight
+          
+          let highlightMarker: any = null
+          
+          const handleMouseMove = (e: MouseEvent) => {
+            const rect = svg.getBoundingClientRect()
+            const x = e.clientX - rect.left - paddingData.left
+            
+            let closestIndex = 0
+            let minDist = Infinity
+            
+            profileData.forEach((point: any, i: number) => {
+              const pointX = scaleX(point.distance)
+              const dist = Math.abs(pointX - x)
+              if (dist < minDist) {
+                minDist = dist
+                closestIndex = i
+              }
+            })
+            
+            const point = profileData[closestIndex]
+            const xPos = scaleX(point.distance) + paddingData.left
+            const yPos = scaleY(point.elevation) + paddingData.top
+            
+            hoverGroup.style.display = 'block'
+            hoverLine.setAttribute('x1', xPos.toString())
+            hoverLine.setAttribute('x2', xPos.toString())
+            hoverDot.setAttribute('cx', xPos.toString())
+            hoverDot.setAttribute('cy', yPos.toString())
+            
+            textElev.textContent = Math.round(point.elevation) + 'm'
+            textDist.textContent = Math.round(point.distance) + 'm'
+            
+            const tooltipX = xPos - 40
+            const tooltipY = yPos - 35
+            tooltip.setAttribute('transform', `translate(${tooltipX}, ${tooltipY})`)
+            
+            // Highlight point on map
+            if (highlightMarker) {
+              highlightMarker.remove()
+            }
+            const L = (window as any).L
+            const mapInstance = (window as any).currentLeafletMap
+            if (L && mapInstance) {
+              highlightMarker = L.marker([point.lat, point.lng], {
+                icon: L.divIcon({
+                  className: 'elevation-highlight',
+                  html: '<div style="width: 12px; height: 12px; background: #ef4444; border: 2px solid white; border-radius: 50%; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>',
+                  iconSize: [12, 12],
+                  iconAnchor: [6, 6]
+                })
+              }).addTo(mapInstance)
+            }
+          }
+          
+          const handleMouseLeave = () => {
+            hoverGroup.style.display = 'none'
+            if (highlightMarker) {
+              highlightMarker.remove()
+              highlightMarker = null
+            }
+          }
+          
+          svg.addEventListener('mousemove', handleMouseMove)
+          svg.addEventListener('mouseleave', handleMouseLeave)
+        }, 50)
+      })
+    }
+    
+    return chartHtml
   }
 
   const addSkiFeatures = () => {
