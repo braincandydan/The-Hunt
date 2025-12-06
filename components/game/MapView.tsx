@@ -112,6 +112,11 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       zoomAnimation: true, // Enable zoom animations
       zoomAnimationThreshold: 4, // Animate zoom if difference is less than 4 levels
     })
+    
+    // Store map instance globally for use in popup scripts
+    if (typeof window !== 'undefined') {
+      ;(window as any).currentLeafletMap = map.current
+    }
 
     // Helper function to apply snowy CSS filters to tiles
     const applySnowyStyling = (layer: any) => {
