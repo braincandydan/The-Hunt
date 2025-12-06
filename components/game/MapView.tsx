@@ -14,6 +14,7 @@ interface MapViewProps {
     difficulty?: string
     geometry: any // GeoJSON geometry
     status?: string
+    metadata?: any // Metadata including elevation data
   }>
   resortName?: string
   onSpeedUpdate?: (speedData: { current: number | null; top: number; average: number }) => void
