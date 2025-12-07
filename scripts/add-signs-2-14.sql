@@ -1,11 +1,11 @@
 -- SQL script to add signs 2-14 to your resort
--- Replace 'YOUR_RESORT_ID' with your actual resort UUID
+-- Replace '2719c1b8-49d7-474a-8d35-59cf9e70331b' with your actual resort UUID
 -- You can find your resort ID by running: SELECT id, name, slug FROM resorts;
 
 -- Sign 2: Summit Vista
 INSERT INTO signs (resort_id, name, description, hint, qr_code, lat, lng, difficulty, order_index, active)
 VALUES (
-  'YOUR_RESORT_ID',  -- Replace with your resort_id
+  '2719c1b8-49d7-474a-8d35-59cf9e70331b',  -- Replace with your resort_id
   'Sign 2',
   'A sign with a view of the summit',
   'Look for the highest point where you can see the entire valley below. This sign is at the peak where eagles dare to fly!',
@@ -20,7 +20,7 @@ VALUES (
 -- Sign 3: Tree Line Trail
 INSERT INTO signs (resort_id, name, description, hint, qr_code, lat, lng, difficulty, order_index, active)
 VALUES (
-  'YOUR_RESORT_ID',
+  '2719c1b8-49d7-474a-8d35-59cf9e70331b',
   'Sign 3',
   'Hidden among the trees',
   'Where the forest meets the slopes, look for a sign nestled between the pines. The trees whisper secrets to those who listen!',
@@ -35,7 +35,7 @@ VALUES (
 -- Sign 4: Lift Line Lookout
 INSERT INTO signs (resort_id, name, description, hint, qr_code, lat, lng, difficulty, order_index, active)
 VALUES (
-  'YOUR_RESORT_ID',
+  '2719c1b8-49d7-474a-8d35-59cf9e70331b',
   'Sign 4',
   'Near the chairlift',
   'Find the sign where skiers queue up for their next adventure. It''s right where the lift takes you higher!',
@@ -50,7 +50,7 @@ VALUES (
 -- Sign 5: Powder Bowl
 INSERT INTO signs (resort_id, name, description, hint, qr_code, lat, lng, difficulty, order_index, active)
 VALUES (
-  'YOUR_RESORT_ID',
+  '2719c1b8-49d7-474a-8d35-59cf9e70331b',
   'Sign 5',
   'In the powder bowl area',
   'Deep in the powder bowl where fresh tracks are made. Look for the sign where the snow is always deepest!',
@@ -65,7 +65,7 @@ VALUES (
 -- Sign 6: Mid-Mountain Rest
 INSERT INTO signs (resort_id, name, description, hint, qr_code, lat, lng, difficulty, order_index, active)
 VALUES (
-  'YOUR_RESORT_ID',
+  '2719c1b8-49d7-474a-8d35-59cf9e70331b',
   'Sign 6',
   'Halfway up the mountain',
   'Perfect spot to catch your breath! This sign marks the midpoint where you''re halfway to the top and halfway to the bottom.',
@@ -80,7 +80,7 @@ VALUES (
 -- Sign 7: Backcountry Gate
 INSERT INTO signs (resort_id, name, description, hint, qr_code, lat, lng, difficulty, order_index, active)
 VALUES (
-  'YOUR_RESORT_ID',
+  '2719c1b8-49d7-474a-8d35-59cf9e70331b',
   'Sign 7',
   'At the backcountry access point',
   'Where the groomed trails end and adventure begins. This sign guards the gateway to untracked terrain!',
@@ -95,7 +95,7 @@ VALUES (
 -- Sign 8: Bunny Hill Bonus
 INSERT INTO signs (resort_id, name, description, hint, qr_code, lat, lng, difficulty, order_index, active)
 VALUES (
-  'YOUR_RESORT_ID',
+  '2719c1b8-49d7-474a-8d35-59cf9e70331b',
   'Sign 8',
   'On the beginner slope',
   'Even beginners can find this one! Look for the sign where new skiers learn to make their first turns.',
@@ -110,7 +110,7 @@ VALUES (
 -- Sign 9: Ridge Runner
 INSERT INTO signs (resort_id, name, description, hint, qr_code, lat, lng, difficulty, order_index, active)
 VALUES (
-  'YOUR_RESORT_ID',
+  '2719c1b8-49d7-474a-8d35-59cf9e70331b',
   'Sign 9',
   'Along the ridge line',
   'Follow the ridge where the wind always blows. This sign is perched on the edge where you can see both sides of the mountain!',
@@ -125,7 +125,7 @@ VALUES (
 -- Sign 10: Glade Guardian
 INSERT INTO signs (resort_id, name, description, hint, qr_code, lat, lng, difficulty, order_index, active)
 VALUES (
-  'YOUR_RESORT_ID',
+  '2719c1b8-49d7-474a-8d35-59cf9e70331b',
   'Sign 10',
   'In the gladed area',
   'Hidden in the trees where powder stays fresh longest. Look for the sign among the glades where tree skiing is at its finest!',
@@ -140,7 +140,7 @@ VALUES (
 -- Sign 11: Base Camp
 INSERT INTO signs (resort_id, name, description, hint, qr_code, lat, lng, difficulty, order_index, active)
 VALUES (
-  'YOUR_RESORT_ID',
+  '2719c1b8-49d7-474a-8d35-59cf9e70331b',
   'Sign 11',
   'Near the base area',
   'Where your adventure begins! This sign is close to where you first step onto the mountain.',
@@ -155,7 +155,7 @@ VALUES (
 -- Sign 12: Steep & Deep
 INSERT INTO signs (resort_id, name, description, hint, qr_code, lat, lng, difficulty, order_index, active)
 VALUES (
-  'YOUR_RESORT_ID',
+  '2719c1b8-49d7-474a-8d35-59cf9e70331b',
   'Sign 12',
   'On the steepest run',
   'For expert skiers only! This sign marks one of the most challenging slopes on the mountain. Are you brave enough?',
@@ -170,7 +170,7 @@ VALUES (
 -- Sign 13: Sunset Slope
 INSERT INTO signs (resort_id, name, description, hint, qr_code, lat, lng, difficulty, order_index, active)
 VALUES (
-  'YOUR_RESORT_ID',
+  '2719c1b8-49d7-474a-8d35-59cf9e70331b',
   'Sign 13',
   'Best sunset viewing spot',
   'Where the day ends in golden glory! This sign is at the perfect spot to watch the sun set over the mountains.',
@@ -185,7 +185,7 @@ VALUES (
 -- Sign 14: Hidden Hollow
 INSERT INTO signs (resort_id, name, description, hint, qr_code, lat, lng, difficulty, order_index, active)
 VALUES (
-  'YOUR_RESORT_ID',
+  '2719c1b8-49d7-474a-8d35-59cf9e70331b',
   'Sign 14',
   'In a hidden valley',
   'Off the beaten path! This sign is tucked away in a hidden hollow that only the most curious explorers find.',

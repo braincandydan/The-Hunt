@@ -31,8 +31,11 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   const maskOverlayRef = useRef<any>(null) // Store the grey mask overlay
   const snowOverlayRef = useRef<any>(null) // Store the snow texture overlay
   const tileLayersRef = useRef<any[]>([]) // Store tile layers so we can update their bounds
+  const layerControlRef = useRef<any>(null) // Store the layer control so we can update it
   const [currentZoom, setCurrentZoom] = useState(13) // Track zoom level
   const [sidebarOpen, setSidebarOpen] = useState(false) // Sidebar open/closed state - hidden by default, we have our own menu
+  const [showLayerMenu, setShowLayerMenu] = useState(false) // Track layer menu visibility
+  const [activeBaseLayer, setActiveBaseLayer] = useState<'snowy' | 'standard' | 'terrain'>('snowy') // Track active base layer
   const [leafletLoaded, setLeafletLoaded] = useState(false)
   const MIN_ZOOM_FOR_LABELS = 15 // Only show labels when zoomed in enough
   const [isTrackingLocation, setIsTrackingLocation] = useState(false) // Track if location is being watched
@@ -66,11 +69,6 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       // Store L in window for use in other effects
       ;(window as any).L = L
       setLeafletLoaded(true)
-      
-      // Store map instance globally for use in popup scripts
-      if (map.current) {
-        ;(window as any).currentLeafletMap = map.current
-      }
     }
     
     loadLeaflet()
@@ -112,11 +110,6 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       zoomAnimation: true, // Enable zoom animations
       zoomAnimationThreshold: 4, // Animate zoom if difference is less than 4 levels
     })
-    
-    // Store map instance globally for use in popup scripts
-    if (typeof window !== 'undefined') {
-      ;(window as any).currentLeafletMap = map.current
-    }
 
     // Helper function to apply snowy CSS filters to tiles
     const applySnowyStyling = (layer: any) => {
@@ -143,19 +136,31 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     })
     applySnowyStyling(osm)
 
+    // OpenTopoMap with terrain/hillshade (no snowy styling - it has its own terrain shading)
+    const terrain = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, © <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)',
+      maxZoom: 17,
+      bounds: defaultBounds,
+    })
+
     // Store tile layers for later bounds updates
-    tileLayersRef.current = [snowyBase, osm]
+    tileLayersRef.current = [snowyBase, osm, terrain]
 
     // Add snowy base layer
     snowyBase.addTo(map.current)
 
-    // Layer control for switching base maps
+    // Layer control for switching base maps (hidden - we'll use custom UI instead)
     const baseMaps = {
       'Snowy Map': snowyBase,
       'Standard Map': osm,
+      'Terrain Map': terrain,
     }
     
-    L.control.layers(baseMaps).addTo(map.current)
+    // Create layer control but position it off-screen so it's hidden
+    // We'll use a custom UI button instead
+    const layerControl = L.control.layers(baseMaps, undefined, { position: 'topright' })
+    // Don't add to map - we'll handle layer switching via custom UI
+    layerControlRef.current = layerControl
 
     // Track zoom level changes
     map.current.on('zoomend', () => {
@@ -209,13 +214,24 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
             // We need to recreate the tile layers with the new bounds option
             const cartoUrl = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
             const osmUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
+            const terrainUrl = 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png'
             
-            // Get which layer is currently active
-            const currentLayer = map.current && map.current.hasLayer(tileLayersRef.current[0]) 
-              ? tileLayersRef.current[0] 
-              : tileLayersRef.current[1]
+            // Get which layer is currently active based on activeBaseLayer state
+            let activeLayerIndex = 0
+            if (activeBaseLayer === 'snowy') {
+              activeLayerIndex = 0
+            } else if (activeBaseLayer === 'standard') {
+              activeLayerIndex = 1
+            } else {
+              activeLayerIndex = 2
+            }
             
-            const isCartoBase = currentLayer && (currentLayer as any)._url?.includes('cartocdn')
+            // Fallback: check which layer is actually on the map
+            tileLayersRef.current.forEach((layer, index) => {
+              if (map.current && map.current.hasLayer(layer)) {
+                activeLayerIndex = index
+              }
+            })
             
             // Remove all tile layers from map
             tileLayersRef.current.forEach((layer) => {
@@ -240,14 +256,35 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
             })
             applySnowyStyling(newOSM)
             
+            // Recreate Terrain layer with bounds (no snowy styling)
+            const newTerrain = L.tileLayer(terrainUrl, {
+              attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, © <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)',
+              maxZoom: 17,
+              bounds: expandedBounds, // Restrict tiles to boundary area
+            })
+            
             // Update refs
-            tileLayersRef.current = [newCartoBase, newOSM]
+            tileLayersRef.current = [newCartoBase, newOSM, newTerrain]
+            
+            // Update layer control reference (we use custom UI, so just update the ref)
+            const updatedBaseMaps = {
+              'Snowy Map': newCartoBase,
+              'Standard Map': newOSM,
+              'Terrain Map': newTerrain,
+            }
+            const updatedLayerControl = L.control.layers(updatedBaseMaps, undefined, { position: 'topright' })
+            layerControlRef.current = updatedLayerControl
             
             // Add the appropriate layer based on what was active before
-            if (isCartoBase) {
-              newCartoBase.addTo(map.current)
+            tileLayersRef.current[activeLayerIndex].addTo(map.current)
+            
+            // Update active base layer state to match
+            if (activeLayerIndex === 0) {
+              setActiveBaseLayer('snowy')
+            } else if (activeLayerIndex === 1) {
+              setActiveBaseLayer('standard')
             } else {
-              newOSM.addTo(map.current)
+              setActiveBaseLayer('terrain')
             }
             
             // Add snow texture overlay for game-like feel
@@ -631,6 +668,35 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     })
   }, [userSpeed, topSpeed, speedHistory, onSpeedUpdate])
 
+  // Switch base layer
+  const switchBaseLayer = (layerType: 'snowy' | 'standard' | 'terrain') => {
+    if (!map.current || !leafletLoaded || typeof window === 'undefined') return
+    const L = (window as any).L
+    if (!L || tileLayersRef.current.length < 3) return
+
+    // Remove current layer
+    const currentLayer = tileLayersRef.current.find(layer => map.current?.hasLayer(layer))
+    if (currentLayer) {
+      map.current.removeLayer(currentLayer)
+    }
+
+    // Add new layer based on type
+    let newLayer
+    if (layerType === 'snowy') {
+      newLayer = tileLayersRef.current[0] // CartoDB
+    } else if (layerType === 'standard') {
+      newLayer = tileLayersRef.current[1] // OSM
+    } else {
+      newLayer = tileLayersRef.current[2] // Terrain
+    }
+
+    if (newLayer) {
+      newLayer.addTo(map.current)
+      setActiveBaseLayer(layerType)
+      setShowLayerMenu(false)
+    }
+  }
+
   // Toggle location tracking
   const toggleLocationTracking = () => {
     if (!navigator.geolocation) {
@@ -1000,236 +1066,6 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     }
   }
 
-  // Helper function to extract elevation profile from geometry
-  const extractElevationProfile = (geometry: any): Array<{distance: number, elevation: number, lat: number, lng: number}> => {
-    const points: Array<{distance: number, elevation: number, lat: number, lng: number}> = []
-    let cumulativeDistance = 0
-    let lastPoint: [number, number, number?] | null = null
-
-    const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
-      const R = 6371000 // Earth radius in meters
-      const dLat = (lat2 - lat1) * Math.PI / 180
-      const dLon = (lon2 - lon1) * Math.PI / 180
-      const a =
-        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-        Math.cos(lat1 * Math.PI / 180) *
-          Math.cos(lat2 * Math.PI / 180) *
-          Math.sin(dLon / 2) *
-          Math.sin(dLon / 2)
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-      return R * c
-    }
-
-    const processCoordinates = (coords: any[]): void => {
-      if (!Array.isArray(coords)) return
-
-      if (coords.length >= 2 && typeof coords[0] === 'number' && typeof coords[1] === 'number') {
-        const lng = coords[0]
-        const lat = coords[1]
-        const elevation = coords.length >= 3 && typeof coords[2] === 'number' ? coords[2] : null
-
-        if (lastPoint) {
-          const distance = calculateDistance(lastPoint[1], lastPoint[0], lat, lng)
-          cumulativeDistance += distance
-        }
-
-        if (elevation !== null && elevation !== undefined) {
-          points.push({ distance: cumulativeDistance, elevation, lat, lng })
-        }
-
-        lastPoint = [lng, lat, elevation || undefined]
-      } else {
-        coords.forEach(processCoordinates)
-      }
-    }
-
-    if (geometry.type === 'LineString') {
-      processCoordinates(geometry.coordinates)
-    } else if (geometry.type === 'MultiLineString') {
-      geometry.coordinates.forEach((line: any[]) => processCoordinates(line))
-    }
-
-    return points
-  }
-
-  // Helper function to create elevation chart HTML
-  const createElevationChart = (profile: Array<{distance: number, elevation: number, lat: number, lng: number}>, featureId: string, layer: L.Layer, mapInstance: any): string => {
-    if (profile.length === 0) return ''
-
-    const width = 300
-    const height = 120
-    const padding = { top: 20, right: 20, bottom: 30, left: 50 }
-    const chartWidth = width - padding.left - padding.right
-    const chartHeight = height - padding.top - padding.bottom
-
-    const distances = profile.map(p => p.distance)
-    const elevations = profile.map(p => p.elevation)
-    const minDistance = Math.min(...distances)
-    const maxDistance = Math.max(...distances)
-    const minElevation = Math.min(...elevations)
-    const maxElevation = Math.max(...elevations)
-    const elevationRange = maxElevation - minElevation || 1
-
-    const scaleX = (distance: number) => ((distance - minDistance) / (maxDistance - minDistance || 1)) * chartWidth
-    const scaleY = (elevation: number) => chartHeight - ((elevation - minElevation) / elevationRange) * chartHeight
-
-    const pathData = profile
-      .map((point, i) => {
-        const x = scaleX(point.distance) + padding.left
-        const y = scaleY(point.elevation) + padding.top
-        return `${i === 0 ? 'M' : 'L'} ${x} ${y}`
-      })
-      .join(' ')
-
-    const uniqueId = `chart-${featureId.replace(/[^a-zA-Z0-9]/g, '-')}-${Date.now()}`
-
-    const chartHtml = `
-      <div style="margin-top: 12px;">
-        <div style="font-size: 11px; color: #6b7280; margin-bottom: 4px; font-weight: 500;">Elevation Profile</div>
-        <svg id="${uniqueId}" width="${width}" height="${height}" style="border: 1px solid #e5e7eb; border-radius: 4px; cursor: crosshair;" data-profile='${JSON.stringify(profile)}' data-padding='${JSON.stringify(padding)}' data-chart-width="${chartWidth}" data-chart-height="${chartHeight}" data-min-distance="${minDistance}" data-max-distance="${maxDistance}" data-min-elevation="${minElevation}" data-max-elevation="${maxElevation}" data-elevation-range="${elevationRange}">
-          <!-- Grid lines -->
-          ${[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
-            const y = padding.top + ratio * chartHeight
-            return `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="#e5e7eb" stroke-width="0.5"/>`
-          }).join('')}
-          
-          <!-- Y-axis labels -->
-          ${[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
-            const elevation = minElevation + (1 - ratio) * elevationRange
-            const y = padding.top + ratio * chartHeight
-            return `<text x="${padding.left - 5}" y="${y + 4}" text-anchor="end" font-size="10" fill="#6b7280">${Math.round(elevation)}m</text>`
-          }).join('')}
-          
-          <!-- X-axis label -->
-          <text x="${width / 2}" y="${height - 5}" text-anchor="middle" font-size="10" fill="#6b7280">Distance: ${Math.round(maxDistance)}m</text>
-          
-          <!-- Gradient definition -->
-          <defs>
-            <linearGradient id="grad-${uniqueId}" x1="0%" y1="0%" x2="0%" y2="100%">
-              <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.4"/>
-              <stop offset="100%" stop-color="#3b82f6" stop-opacity="0.1"/>
-            </linearGradient>
-          </defs>
-          
-          <!-- Fill area -->
-          <path d="${pathData} L ${width - padding.right} ${padding.top + chartHeight} L ${padding.left} ${padding.top + chartHeight} Z" fill="url(#grad-${uniqueId})"/>
-          
-          <!-- Elevation path -->
-          <path d="${pathData}" fill="none" stroke="#3b82f6" stroke-width="2"/>
-          
-          <!-- Hover indicator (initially hidden) -->
-          <g id="hover-${uniqueId}" style="display: none;">
-            <line id="line-${uniqueId}" x1="0" y1="${padding.top}" x2="0" y2="${padding.top + chartHeight}" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="4,4"/>
-            <circle id="dot-${uniqueId}" cx="0" cy="0" r="4" fill="#ef4444" stroke="white" stroke-width="2"/>
-            <g id="tooltip-${uniqueId}">
-              <rect x="0" y="0" width="80" height="30" fill="rgba(0,0,0,0.8)" rx="4"/>
-              <text id="text-elev-${uniqueId}" x="40" y="15" text-anchor="middle" font-size="10" fill="white" font-weight="bold">0m</text>
-              <text id="text-dist-${uniqueId}" x="40" y="27" text-anchor="middle" font-size="9" fill="#d1d5db">0m</text>
-            </g>
-          </g>
-        </svg>
-      </div>
-    `
-    
-    // Attach event listeners when popup opens (using Leaflet popupopen event)
-    if (layer && (layer as any).on) {
-      (layer as any).once('popupopen', () => {
-        setTimeout(() => {
-          const svg = document.getElementById(uniqueId)
-          if (!svg) return
-          
-          const profileData = JSON.parse(svg.getAttribute('data-profile') || '[]')
-          const paddingData = JSON.parse(svg.getAttribute('data-padding') || '{}')
-          const chartWidth = parseFloat(svg.getAttribute('data-chart-width') || '0')
-          const chartHeight = parseFloat(svg.getAttribute('data-chart-height') || '0')
-          const minDistance = parseFloat(svg.getAttribute('data-min-distance') || '0')
-          const maxDistance = parseFloat(svg.getAttribute('data-max-distance') || '0')
-          const minElevation = parseFloat(svg.getAttribute('data-min-elevation') || '0')
-          const maxElevation = parseFloat(svg.getAttribute('data-max-elevation') || '0')
-          const elevationRange = parseFloat(svg.getAttribute('data-elevation-range') || '1')
-          
-          const hoverGroup = document.getElementById(`hover-${uniqueId}`)
-          const hoverLine = document.getElementById(`line-${uniqueId}`)
-          const hoverDot = document.getElementById(`dot-${uniqueId}`)
-          const tooltip = document.getElementById(`tooltip-${uniqueId}`)
-          const textElev = document.getElementById(`text-elev-${uniqueId}`)
-          const textDist = document.getElementById(`text-dist-${uniqueId}`)
-          
-          if (!hoverGroup || !hoverLine || !hoverDot || !tooltip || !textElev || !textDist) return
-          
-          const scaleX = (d: number) => ((d - minDistance) / (maxDistance - minDistance || 1)) * chartWidth
-          const scaleY = (e: number) => chartHeight - ((e - minElevation) / elevationRange) * chartHeight
-          
-          let highlightMarker: any = null
-          
-          const handleMouseMove = (e: MouseEvent) => {
-            const rect = svg.getBoundingClientRect()
-            const x = e.clientX - rect.left - paddingData.left
-            
-            let closestIndex = 0
-            let minDist = Infinity
-            
-            profileData.forEach((point: any, i: number) => {
-              const pointX = scaleX(point.distance)
-              const dist = Math.abs(pointX - x)
-              if (dist < minDist) {
-                minDist = dist
-                closestIndex = i
-              }
-            })
-            
-            const point = profileData[closestIndex]
-            const xPos = scaleX(point.distance) + paddingData.left
-            const yPos = scaleY(point.elevation) + paddingData.top
-            
-            hoverGroup.style.display = 'block'
-            hoverLine.setAttribute('x1', xPos.toString())
-            hoverLine.setAttribute('x2', xPos.toString())
-            hoverDot.setAttribute('cx', xPos.toString())
-            hoverDot.setAttribute('cy', yPos.toString())
-            
-            textElev.textContent = Math.round(point.elevation) + 'm'
-            textDist.textContent = Math.round(point.distance) + 'm'
-            
-            const tooltipX = xPos - 40
-            const tooltipY = yPos - 35
-            tooltip.setAttribute('transform', `translate(${tooltipX}, ${tooltipY})`)
-            
-            // Highlight point on map
-            if (highlightMarker) {
-              highlightMarker.remove()
-            }
-            const L = (window as any).L
-            const mapInstance = (window as any).currentLeafletMap
-            if (L && mapInstance) {
-              highlightMarker = L.marker([point.lat, point.lng], {
-                icon: L.divIcon({
-                  className: 'elevation-highlight',
-                  html: '<div style="width: 12px; height: 12px; background: #ef4444; border: 2px solid white; border-radius: 50%; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>',
-                  iconSize: [12, 12],
-                  iconAnchor: [6, 6]
-                })
-              }).addTo(mapInstance)
-            }
-          }
-          
-          const handleMouseLeave = () => {
-            hoverGroup.style.display = 'none'
-            if (highlightMarker) {
-              highlightMarker.remove()
-              highlightMarker = null
-            }
-          }
-          
-          svg.addEventListener('mousemove', handleMouseMove)
-          svg.addEventListener('mouseleave', handleMouseLeave)
-        }, 50)
-      })
-    }
-    
-    return chartHtml
-  }
-
   const addSkiFeatures = () => {
     if (!map.current || skiFeatures.length === 0 || typeof window === 'undefined') return
     const L = (window as any).L
@@ -1368,40 +1204,39 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
             const metadata = props.metadata || {}
             const originalProps = metadata.original_properties || {}
             
-            // Extract elevation data and create profile
+            // Extract elevation data
             let elevationInfo = ''
-            let elevationChart = ''
             if (props.type === 'trail') {
-              // Extract elevation profile from geometry
-              const profile = extractElevationProfile(feature.geometry)
+              // Try multiple common elevation field names
+              const elevation = originalProps.elevation || 
+                               originalProps.ele || 
+                               originalProps.elevation_max ||
+                               originalProps.elevation_min ||
+                               originalProps.height
               
-              if (profile.length > 0) {
-                // Create elevation chart
-                elevationChart = createElevationChart(profile, feature.id, layer, map.current)
-                
-                // Show elevation range
-                const elevations = profile.map(p => p.elevation)
-                const maxElev = Math.max(...elevations)
-                const minElev = Math.min(...elevations)
-                const maxFeet = Math.round(maxElev * 3.28084)
-                const minFeet = Math.round(minElev * 3.28084)
-                elevationInfo = `<p style="color: #6b7280; font-size: 14px; margin-bottom: 4px;">
-                  <strong>Elevation:</strong> ${Math.round(minElev)}m - ${Math.round(maxElev)}m (${minFeet}ft - ${maxFeet}ft)
-                </p>`
+              // If we have elevation data, display it
+              if (elevation !== undefined && elevation !== null) {
+                const elevationMeters = typeof elevation === 'number' ? elevation : parseFloat(elevation)
+                if (!isNaN(elevationMeters)) {
+                  const elevationFeet = Math.round(elevationMeters * 3.28084)
+                  elevationInfo = `<p style="color: #6b7280; font-size: 14px; margin-bottom: 4px;">
+                    <strong>Elevation:</strong> ${Math.round(elevationMeters)}m (${elevationFeet}ft)
+                  </p>`
+                }
               } else {
-                // Try metadata elevation fields as fallback
-                const elevation = originalProps.elevation || 
-                                 originalProps.ele || 
-                                 originalProps.elevation_max ||
-                                 originalProps.elevation_min ||
-                                 originalProps.height
-                
-                if (elevation !== undefined && elevation !== null) {
-                  const elevationMeters = typeof elevation === 'number' ? elevation : parseFloat(elevation)
-                  if (!isNaN(elevationMeters)) {
-                    const elevationFeet = Math.round(elevationMeters * 3.28084)
+                // Try to calculate from geometry coordinates (if 3D coordinates exist)
+                const coords = feature.geometry.coordinates
+                if (coords && Array.isArray(coords)) {
+                  // For LineString, check if coordinates have Z values
+                  const flatCoords = coords.flat(2)
+                  const elevations = flatCoords.filter((_, i) => i % 3 === 2 && typeof flatCoords[i] === 'number')
+                  if (elevations.length > 0) {
+                    const maxElev = Math.max(...elevations)
+                    const minElev = Math.min(...elevations)
+                    const maxFeet = Math.round(maxElev * 3.28084)
+                    const minFeet = Math.round(minElev * 3.28084)
                     elevationInfo = `<p style="color: #6b7280; font-size: 14px; margin-bottom: 4px;">
-                      <strong>Elevation:</strong> ${Math.round(elevationMeters)}m (${elevationFeet}ft)
+                      <strong>Elevation:</strong> ${Math.round(minElev)}m - ${Math.round(maxElev)}m (${minFeet}ft - ${maxFeet}ft)
                     </p>`
                   }
                 }
@@ -1416,7 +1251,6 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
                 </p>
                 ${props.difficulty ? `<p style="color: #6b7280; font-size: 14px; margin-bottom: 4px;"><strong>Difficulty:</strong> ${props.difficulty}</p>` : ''}
                 ${elevationInfo}
-                ${elevationChart}
                 ${props.status ? `<p style="color: #6b7280; font-size: 14px;"><strong>Status:</strong> ${props.status}</p>` : ''}
               </div>
             `
@@ -1525,10 +1359,77 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       {/* Fullscreen Map */}
       <div ref={mapContainer} className="w-full h-full" />
       
+      {/* Layer Switcher Button */}
+      <div className="fixed top-24 right-4 z-[1001]">
+        <button
+          onClick={() => setShowLayerMenu(!showLayerMenu)}
+          className="bg-white rounded-full p-3 shadow-lg hover:shadow-xl transition-all hover:scale-105 touch-manipulation text-gray-700"
+          aria-label="Change map style"
+          title="Change map style"
+        >
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h4a1 1 0 011 1v7a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v7a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 16a1 1 0 011-1h4a1 1 0 011 1v3a1 1 0 01-1 1H5a1 1 0 01-1-1v-3zM14 16a1 1 0 011-1h4a1 1 0 011 1v3a1 1 0 01-1 1h-4a1 1 0 01-1-1v-3z" />
+          </svg>
+        </button>
+        
+        {/* Layer Menu Dropdown */}
+        {showLayerMenu && (
+          <>
+            {/* Backdrop to close menu on click outside */}
+            <div 
+              className="fixed inset-0 z-[1000]" 
+              onClick={() => setShowLayerMenu(false)}
+            />
+            {/* Menu */}
+            <div className="absolute top-full right-0 mt-2 bg-white rounded-lg shadow-xl overflow-hidden min-w-[160px] z-[1002]">
+              <button
+                onClick={() => switchBaseLayer('snowy')}
+                className={`w-full text-left px-4 py-3 hover:bg-gray-50 transition-colors flex items-center justify-between ${
+                  activeBaseLayer === 'snowy' ? 'bg-blue-50 text-blue-600' : 'text-gray-700'
+                }`}
+              >
+                <span className="font-medium">Snowy Map</span>
+                {activeBaseLayer === 'snowy' && (
+                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                  </svg>
+                )}
+              </button>
+              <button
+                onClick={() => switchBaseLayer('standard')}
+                className={`w-full text-left px-4 py-3 hover:bg-gray-50 transition-colors flex items-center justify-between border-t border-gray-100 ${
+                  activeBaseLayer === 'standard' ? 'bg-blue-50 text-blue-600' : 'text-gray-700'
+                }`}
+              >
+                <span className="font-medium">Standard Map</span>
+                {activeBaseLayer === 'standard' && (
+                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                  </svg>
+                )}
+              </button>
+              <button
+                onClick={() => switchBaseLayer('terrain')}
+                className={`w-full text-left px-4 py-3 hover:bg-gray-50 transition-colors flex items-center justify-between border-t border-gray-100 ${
+                  activeBaseLayer === 'terrain' ? 'bg-blue-50 text-blue-600' : 'text-gray-700'
+                }`}
+              >
+                <span className="font-medium">Terrain Map</span>
+                {activeBaseLayer === 'terrain' && (
+                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                  </svg>
+                )}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
       {/* Location Tracking Button */}
       <button
         onClick={toggleLocationTracking}
-        className={`fixed top-24 right-4 z-[1001] rounded-full p-3 shadow-lg hover:shadow-xl transition-all hover:scale-105 touch-manipulation ${
+        className={`fixed top-32 right-4 z-[1001] rounded-full p-3 shadow-lg hover:shadow-xl transition-all hover:scale-105 touch-manipulation ${
           isTrackingLocation 
             ? 'bg-blue-500 text-white' 
             : 'bg-white text-gray-700 hover:bg-gray-50'
@@ -1551,7 +1452,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
 
       {/* Speed Display Widget */}
       {isTrackingLocation && (
-        <div className="fixed top-32 right-4 z-[1001] bg-white rounded-lg shadow-lg px-4 py-3 min-w-[120px]">
+        <div className="fixed top-40 right-4 z-[1001] bg-white rounded-lg shadow-lg px-4 py-3 min-w-[120px]">
           <div className="flex items-center gap-2">
             <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
@@ -1576,7 +1477,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       {/* Location Error Message */}
       {locationError && (
         <div className={`fixed right-4 z-[1002] bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-lg shadow-lg max-w-xs ${
-          isTrackingLocation ? 'top-44' : 'top-32'
+          isTrackingLocation ? 'top-52' : 'top-40'
         }`}>
           <div className="flex items-start gap-2">
             <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
