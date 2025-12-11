@@ -43,6 +43,7 @@ Create a `.env.local` file with:
 ```
 NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key  # For admin scripts only
 # No map API key needed - uses free OpenStreetMap tiles
 ```
 
@@ -89,6 +90,23 @@ The application uses the following main tables:
 - `prizes` - Prizes/rewards configuration
 
 See `supabase/migrations/` for the complete schema.
+
+## Adding New Resorts
+
+This application supports multiple resorts in a single deployment. To onboard a new resort:
+
+1. **Quick Start:** Use the automated script:
+   ```bash
+   npx tsx scripts/create-resort.ts
+   ```
+
+2. **Manual Setup:** See [ONBOARDING_GUIDE.md](./ONBOARDING_GUIDE.md) for detailed instructions.
+
+**Key Points:**
+- ✅ Single codebase serves all resorts
+- ✅ Single Supabase instance (no duplication needed)
+- ✅ Data isolation via Row Level Security (RLS)
+- ✅ Per-resort theming and branding
 
 ## Deployment
 

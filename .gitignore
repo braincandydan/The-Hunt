@@ -30,6 +30,7 @@ yarn-error.log*
 
 # docs folder (contains large reference GeoJSON files)
 /docs/
+public/docs/*.geojson
 .env
 
 # vercel

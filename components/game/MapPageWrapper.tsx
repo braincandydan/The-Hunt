@@ -69,6 +69,12 @@ export default function MapPageWrapper({
         }))}
         resortName={resort.name}
         onSpeedUpdate={setSpeedData}
+        scene3DUrl="/3d-map/index.html"
+        scene3DCenter={[49.73283, -118.9412]} // Big White ski hill center [lat, lng]
+        additionalGeoJSONPaths={[
+          '/3d-map/geojson/TreeBackground.geojson',
+          '/3d-map/geojson/SkiRunBackground.geojson',
+        ]}
       />
 
       {/* Progress Bar */}

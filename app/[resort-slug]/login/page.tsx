@@ -81,12 +81,24 @@ export default function ResortLoginPage({
           .single()
 
         if (resort) {
-          // Update user metadata with resort association
+          // Add user to user_resorts table (tracks which resorts user has joined)
+          await supabase
+            .from('user_resorts')
+            .insert({
+              user_id: data.user.id,
+              resort_id: resort.id,
+            })
+            // Use upsert to avoid errors if already exists
+            .select()
+            .single()
+
+          // Also set as primary resort in user_metadata (for backward compatibility)
+          // This can be used as "home resort" or default resort
           await supabase
             .from('user_metadata')
             .upsert({
               id: data.user.id,
-              resort_id: resort.id,
+              resort_id: resort.id, // Primary/home resort
             })
         }
       }

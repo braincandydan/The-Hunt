@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Sign } from '@/lib/utils/types'
+import MapView3D from './MapView3D'
 
 interface MapViewProps {
   resortSlug: string
@@ -18,9 +19,16 @@ interface MapViewProps {
   }>
   resortName?: string
   onSpeedUpdate?: (speedData: { current: number | null; top: number; average: number }) => void
+  // Optional: Path to qgisthreejs 3D scene export
+  scene3DUrl?: string // e.g., '/3d-map/index.html' or '/3d-map/scene.json'
+  // Optional: Center coordinates for 3D scene
+  scene3DCenter?: [number, number] // [lat, lng]
+  // Optional: Paths to additional GeoJSON files from QGIS exports
+  additionalGeoJSONPaths?: string[] // e.g., ['/3d-map/geojson/tree-line.json', '/3d-map/geojson/runs.json']
 }
 
-export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatures = [], resortName = 'Resort', onSpeedUpdate }: MapViewProps) {
+export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatures = [], resortName = 'Resort', onSpeedUpdate, scene3DUrl, scene3DCenter, additionalGeoJSONPaths }: MapViewProps) {
+  const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d') // Toggle between 2D and 3D-Three.js
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<any>(null) // Use any to avoid type issues before Leaflet loads
   const markersRef = useRef<any[]>([])
@@ -35,7 +43,10 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   const [currentZoom, setCurrentZoom] = useState(13) // Track zoom level
   const [sidebarOpen, setSidebarOpen] = useState(false) // Sidebar open/closed state - hidden by default, we have our own menu
   const [showLayerMenu, setShowLayerMenu] = useState(false) // Track layer menu visibility
-  const [activeBaseLayer, setActiveBaseLayer] = useState<'snowy' | 'standard' | 'terrain'>('snowy') // Track active base layer
+  const [activeBaseLayer, setActiveBaseLayer] = useState<'snowy' | 'standard' | 'terrain' | 'satellite'>('snowy') // Track active base layer
+  const [showHillshade, setShowHillshade] = useState(false) // Track hillshade overlay visibility
+  const [hillshadeType, setHillshadeType] = useState<'esri' | 'esri-dark' | 'esri-shaded' | 'esri-terrain3d' | 'stadia'>('esri') // Which hillshade to use
+  const hillshadeLayerRef = useRef<any>(null) // Store hillshade overlay layer
   const [leafletLoaded, setLeafletLoaded] = useState(false)
   const MIN_ZOOM_FOR_LABELS = 15 // Only show labels when zoomed in enough
   const [isTrackingLocation, setIsTrackingLocation] = useState(false) // Track if location is being watched
@@ -57,6 +68,8 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       await import('leaflet/dist/leaflet.css')
       // @ts-ignore - leaflet-textpath doesn't have types
       await import('leaflet-textpath')
+      // @ts-ignore - esri-leaflet for dynamic ESRI services
+      await import('esri-leaflet')
       
       // Fix Leaflet default marker icon issue with Next.js
       delete (L.Icon.Default.prototype as any)._getIconUrl
@@ -143,8 +156,19 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       bounds: defaultBounds,
     })
 
+    // ESRI World Imagery - high-resolution satellite imagery
+    const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      attribution: '© <a href="https://www.esri.com">Esri</a>, Maxar, Earthstar Geographics',
+      maxZoom: 19,
+      bounds: defaultBounds,
+    })
+
+    // Hillshade overlay will be created on-demand when toggled
+    // This avoids loading tiles until needed
+    console.log('[Hillshade] Ready to create layer on demand')
+
     // Store tile layers for later bounds updates
-    tileLayersRef.current = [snowyBase, osm, terrain]
+    tileLayersRef.current = [snowyBase, osm, terrain, satellite]
 
     // Add snowy base layer
     snowyBase.addTo(map.current)
@@ -263,14 +287,32 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
               bounds: expandedBounds, // Restrict tiles to boundary area
             })
             
+            // Recreate Satellite layer with bounds
+            const satelliteUrl = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+            const newSatellite = L.tileLayer(satelliteUrl, {
+              attribution: '© <a href="https://www.esri.com">Esri</a>, Maxar, Earthstar Geographics',
+              maxZoom: 19,
+              bounds: expandedBounds, // Restrict tiles to boundary area
+            })
+            
+            // Handle hillshade layer bounds update if it exists
+            if (hillshadeLayerRef.current && map.current.hasLayer(hillshadeLayerRef.current)) {
+              // Remove and recreate with new bounds
+              map.current.removeLayer(hillshadeLayerRef.current)
+              // Will be recreated on next toggle with correct bounds
+              hillshadeLayerRef.current = null
+              console.log('[Hillshade] Cleared for bounds update, will recreate on next toggle')
+            }
+            
             // Update refs
-            tileLayersRef.current = [newCartoBase, newOSM, newTerrain]
+            tileLayersRef.current = [newCartoBase, newOSM, newTerrain, newSatellite]
             
             // Update layer control reference (we use custom UI, so just update the ref)
             const updatedBaseMaps = {
               'Snowy Map': newCartoBase,
               'Standard Map': newOSM,
               'Terrain Map': newTerrain,
+              'Satellite': newSatellite,
             }
             const updatedLayerControl = L.control.layers(updatedBaseMaps, undefined, { position: 'topright' })
             layerControlRef.current = updatedLayerControl
@@ -283,8 +325,10 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
               setActiveBaseLayer('snowy')
             } else if (activeLayerIndex === 1) {
               setActiveBaseLayer('standard')
-            } else {
+            } else if (activeLayerIndex === 2) {
               setActiveBaseLayer('terrain')
+            } else {
+              setActiveBaseLayer('satellite')
             }
             
             // Add snow texture overlay for game-like feel
@@ -330,50 +374,8 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
             // Note: Layer control will continue to work with the new layers
             // The layers themselves are replaced but the control references will update automatically
             
-            // Set min zoom to prevent zooming out beyond the visible boundary area
-            // Calculate the zoom level needed to fit the expanded bounds in the viewport
-            // Using false means no padding - this ensures users can't zoom out to see the dark overlay
-            const calculateMinZoom = () => {
-              if (!map.current) return 10 // fallback
-              // Recalculate based on current map size to ensure accuracy
-              return map.current.getBoundsZoom(expandedBounds, false)
-            }
-            
-            const minZoomForBounds = calculateMinZoom()
-            // Set minZoom to exactly match the required zoom to prevent seeing dark overlay area
-            map.current.setMinZoom(minZoomForBounds)
-            
-            // Also ensure current zoom doesn't go below the minimum (in case user zoomed out before boundary loaded)
-            const currentZoomLevel = map.current.getZoom()
-            if (currentZoomLevel < minZoomForBounds) {
-              map.current.setZoom(minZoomForBounds)
-            }
-            
-            // Add zoom event listener to enforce minimum zoom and prevent seeing dark overlay
-            const enforceMinZoom = () => {
-              if (map.current) {
-                const currentMinZoom = calculateMinZoom()
-                const currentZoom = map.current.getZoom()
-                // Update minZoom in case map was resized
-                if (map.current.getMinZoom() !== currentMinZoom) {
-                  map.current.setMinZoom(currentMinZoom)
-                }
-                // Enforce minimum zoom - prevent zooming out beyond the dark overlay
-                if (currentZoom < currentMinZoom) {
-                  map.current.setZoom(currentMinZoom)
-                }
-              }
-            }
-            
-            // Listen to zoom events to prevent zooming out too far
-            map.current.on('zoomend', enforceMinZoom)
-            map.current.on('zoom', enforceMinZoom)
-            // Also enforce on resize in case map container size changes
-            map.current.on('resize', () => {
-              const newMinZoom = calculateMinZoom()
-              map.current?.setMinZoom(newMinZoom)
-              enforceMinZoom()
-            })
+            // REMOVED: Zoom lock - allow free zooming in/out
+            // Users can now zoom freely without restrictions
             
             // Create a grey mask overlay for areas outside the boundary
             // We'll create a polygon covering the expanded bounds with the boundary as a hole
@@ -490,6 +492,10 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
             map.current.removeLayer(snowOverlayRef.current)
           }
           snowOverlayRef.current = null
+          if (hillshadeLayerRef.current && map.current?.hasLayer(hillshadeLayerRef.current)) {
+            map.current.removeLayer(hillshadeLayerRef.current)
+          }
+          hillshadeLayerRef.current = null
       if (map.current) {
         map.current.remove()
         map.current = null
@@ -669,10 +675,10 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   }, [userSpeed, topSpeed, speedHistory, onSpeedUpdate])
 
   // Switch base layer
-  const switchBaseLayer = (layerType: 'snowy' | 'standard' | 'terrain') => {
+  const switchBaseLayer = (layerType: 'snowy' | 'standard' | 'terrain' | 'satellite') => {
     if (!map.current || !leafletLoaded || typeof window === 'undefined') return
     const L = (window as any).L
-    if (!L || tileLayersRef.current.length < 3) return
+    if (!L || tileLayersRef.current.length < 4) return
 
     // Remove current layer
     const currentLayer = tileLayersRef.current.find(layer => map.current?.hasLayer(layer))
@@ -686,14 +692,165 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       newLayer = tileLayersRef.current[0] // CartoDB
     } else if (layerType === 'standard') {
       newLayer = tileLayersRef.current[1] // OSM
-    } else {
+    } else if (layerType === 'terrain') {
       newLayer = tileLayersRef.current[2] // Terrain
+    } else {
+      newLayer = tileLayersRef.current[3] // Satellite
     }
 
     if (newLayer) {
       newLayer.addTo(map.current)
       setActiveBaseLayer(layerType)
       setShowLayerMenu(false)
+    }
+  }
+
+  // Create hillshade layer based on type
+  const createHillshadeLayer = (type: 'esri' | 'esri-dark' | 'esri-shaded' | 'esri-terrain3d' | 'stadia', bounds?: any) => {
+    if (typeof window === 'undefined') return null
+    const L = (window as any).L
+    if (!L) return null
+
+    // Check if esri-leaflet is available for dynamic layers
+    const esriLeaflet = (L as any).esri
+
+    // Special case: ESRI Terrain 3D uses dynamic image service for better resolution
+    if (type === 'esri-terrain3d' && esriLeaflet) {
+      try {
+        // Use ESRI's World Elevation service with hillshade rendering
+        // This is the same data source as the ArcGIS ImageryTileLayer
+        const layer = esriLeaflet.imageMapLayer({
+          url: 'https://elevation.arcgis.com/arcgis/rest/services/WorldElevation/Terrain/ImageServer',
+          attribution: '© <a href="https://www.esri.com">Esri</a> - High Resolution Terrain',
+          opacity: 0.6,
+          // Rendering rule for hillshade visualization
+          renderingRule: {
+            rasterFunction: 'Hillshade',
+            rasterFunctionArguments: {
+              Azimuth: 315,
+              Altitude: 45,
+              ZFactor: 1
+            }
+          }
+        })
+        console.log('[Hillshade] Created ESRI Terrain3D dynamic layer')
+        return layer
+      } catch (e) {
+        console.warn('[Hillshade] Failed to create Terrain3D layer, falling back to standard:', e)
+        // Fall back to standard ESRI hillshade
+        type = 'esri'
+      }
+    }
+
+    const layerConfigs: Record<string, { url: string; attribution: string; maxZoom: number; opacity: number }> = {
+      // ESRI World Hillshade - standard grayscale hillshade (varies by region)
+      'esri': {
+        url: 'https://services.arcgisonline.com/arcgis/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}',
+        attribution: '© <a href="https://www.esri.com">Esri</a>',
+        maxZoom: 23,
+        opacity: 0.6,
+      },
+      // ESRI World Hillshade Dark - darker version with better contrast
+      'esri-dark': {
+        url: 'https://services.arcgisonline.com/arcgis/rest/services/Elevation/World_Hillshade_Dark/MapServer/tile/{z}/{y}/{x}',
+        attribution: '© <a href="https://www.esri.com">Esri</a>',
+        maxZoom: 23,
+        opacity: 0.5,
+      },
+      // ESRI World Shaded Relief - colored terrain with elevation shading
+      'esri-shaded': {
+        url: 'https://services.arcgisonline.com/arcgis/rest/services/World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}',
+        attribution: '© <a href="https://www.esri.com">Esri</a>',
+        maxZoom: 13,
+        opacity: 0.5,
+      },
+      // Stadia Terrain - consistent quality, artistic style
+      'stadia': {
+        url: 'https://tiles.stadiamaps.com/tiles/stamen_terrain_background/{z}/{x}/{y}{r}.png',
+        attribution: '© <a href="https://stadiamaps.com/">Stadia Maps</a>',
+        maxZoom: 18,
+        opacity: 0.45,
+      },
+      // Fallback for esri-terrain3d if esri-leaflet not available
+      'esri-terrain3d': {
+        url: 'https://services.arcgisonline.com/arcgis/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}',
+        attribution: '© <a href="https://www.esri.com">Esri</a>',
+        maxZoom: 23,
+        opacity: 0.6,
+      },
+    }
+
+    const config = layerConfigs[type] || layerConfigs['esri']
+    
+    return L.tileLayer(config.url, {
+      attribution: config.attribution,
+      maxZoom: config.maxZoom,
+      bounds: bounds,
+      opacity: config.opacity,
+      zIndex: 250,
+      className: 'hillshade-layer',
+    })
+  }
+
+  // Toggle hillshade overlay
+  const toggleHillshade = () => {
+    if (!map.current || !leafletLoaded || typeof window === 'undefined') return
+    
+    console.log('[Hillshade] Toggle called, current state:', showHillshade)
+
+    if (showHillshade) {
+      // Remove hillshade
+      console.log('[Hillshade] Removing layer')
+      if (hillshadeLayerRef.current && map.current.hasLayer(hillshadeLayerRef.current)) {
+        map.current.removeLayer(hillshadeLayerRef.current)
+      }
+      setShowHillshade(false)
+    } else {
+      // Create and add hillshade layer
+      if (!hillshadeLayerRef.current) {
+        hillshadeLayerRef.current = createHillshadeLayer(hillshadeType)
+      }
+      
+      if (hillshadeLayerRef.current) {
+        console.log('[Hillshade] Adding layer to map, type:', hillshadeType)
+        hillshadeLayerRef.current.addTo(map.current)
+        hillshadeLayerRef.current.setZIndex(250)
+        
+        // Apply CSS blend mode for better terrain visibility
+        const container = hillshadeLayerRef.current.getContainer()
+        if (container) {
+          container.style.mixBlendMode = 'multiply'
+        }
+        
+        setShowHillshade(true)
+        console.log('[Hillshade] Layer added successfully')
+      }
+    }
+  }
+
+  // Switch hillshade type
+  const switchHillshadeType = (type: 'esri' | 'esri-dark' | 'esri-shaded' | 'esri-terrain3d' | 'stadia') => {
+    if (!map.current || !leafletLoaded) return
+    
+    const wasShowing = showHillshade
+    
+    // Remove current layer if showing
+    if (hillshadeLayerRef.current && map.current.hasLayer(hillshadeLayerRef.current)) {
+      map.current.removeLayer(hillshadeLayerRef.current)
+    }
+    
+    // Create new layer of the selected type
+    hillshadeLayerRef.current = createHillshadeLayer(type)
+    setHillshadeType(type)
+    
+    // Re-add if was showing
+    if (wasShowing && hillshadeLayerRef.current) {
+      hillshadeLayerRef.current.addTo(map.current)
+      hillshadeLayerRef.current.setZIndex(250)
+      const container = hillshadeLayerRef.current.getContainer()
+      if (container) {
+        container.style.mixBlendMode = 'multiply'
+      }
     }
   }
 
@@ -1071,8 +1228,17 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     const L = (window as any).L
     if (!L) return
 
-    skiFeatures.forEach((feature) => {
+    console.log(`[MapView] Adding ${skiFeatures.length} ski features to map`)
+    console.log(`[MapView] Feature types:`, skiFeatures.map(f => f.type))
+    
+    skiFeatures.forEach((feature, index) => {
       try {
+        // Validate geometry
+        if (!feature.geometry || !feature.geometry.type || !feature.geometry.coordinates) {
+          console.warn(`[MapView] Skipping feature ${feature.name || index}: invalid geometry`, feature.geometry)
+          return
+        }
+        
         // Create GeoJSON feature from geometry
         const geoJsonFeature: GeoJSON.Feature = {
           type: 'Feature' as const,
@@ -1348,19 +1514,94 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
 
         geoJsonLayer.addTo(map.current!)
         layersRef.current.push(geoJsonLayer)
+        
+        // Debug: log first few features being added
+        if (layersRef.current.length <= 10) {
+          try {
+            const bounds = geoJsonLayer.getBounds()
+            console.log(`[MapView] Added feature: ${feature.name} (${feature.type})`, {
+              geometryType: feature.geometry?.type,
+              hasCoordinates: !!feature.geometry?.coordinates,
+              bounds: bounds ? `${bounds.getSouthWest().lat.toFixed(4)}, ${bounds.getSouthWest().lng.toFixed(4)} to ${bounds.getNorthEast().lat.toFixed(4)}, ${bounds.getNorthEast().lng.toFixed(4)}` : 'no bounds',
+              layerCount: layersRef.current.length
+            })
+          } catch (e) {
+            console.log(`[MapView] Added feature: ${feature.name} (${feature.type})`, {
+              geometryType: feature.geometry?.type,
+              hasCoordinates: !!feature.geometry?.coordinates,
+              layerCount: layersRef.current.length,
+              error: e
+            })
+          }
+        }
       } catch (e) {
         console.error('Error adding ski feature:', feature.name, e)
       }
     })
+    
+    console.log(`[MapView] Total layers added: ${layersRef.current.length}`)
   }
+
+  // If 3D mode is enabled and scene URL is provided, render Three.js 3D view
+  if (viewMode === '3d' && scene3DUrl) {
+    return (
+      <div className="relative w-full h-full">
+        <MapView3D
+          resortSlug={resortSlug}
+          signs={signs}
+          discoveredSignIds={discoveredSignIds}
+          skiFeatures={skiFeatures}
+          resortName={resortName}
+          onSpeedUpdate={onSpeedUpdate}
+          sceneUrl={scene3DUrl}
+          center={scene3DCenter}
+          additionalGeoJSONPaths={additionalGeoJSONPaths}
+        />
+        
+        {/* Toggle Button - 3D to 2D */}
+        <button
+          onClick={() => setViewMode('2d')}
+          className="fixed top-4 right-4 z-[1002] bg-white rounded-full p-3 shadow-lg hover:shadow-xl transition-all hover:scale-105 touch-manipulation text-gray-700"
+          aria-label="Switch to 2D map"
+          title="Switch to 2D map (shows all features)"
+        >
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
+          </svg>
+        </button>
+        
+        {/* Info banner */}
+        <div className="fixed top-16 left-1/2 transform -translate-x-1/2 z-[1002] bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 shadow-lg pointer-events-none">
+          <p className="text-xs text-blue-800 text-center">
+            <strong>3D Terrain View:</strong> Shows your QGIS 3D terrain. Switch to 2D map to see all features (signs, trails, lifts).
+          </p>
+        </div>
+      </div>
+    )
+  }
+
 
   return (
     <div className="relative w-full h-full">
       {/* Fullscreen Map */}
       <div ref={mapContainer} className="w-full h-full" />
       
+      {/* 3D Toggle Button */}
+      {scene3DUrl && (
+        <button
+          onClick={() => setViewMode('3d')}
+          className="fixed top-4 right-4 z-[1002] bg-white rounded-full p-3 shadow-lg hover:shadow-xl transition-all hover:scale-105 touch-manipulation text-gray-700"
+          aria-label="Switch to 3D map"
+          title="Switch to 3D map - Interactive 3D with terrain and features"
+        >
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+          </svg>
+        </button>
+      )}
+      
       {/* Layer Switcher Button */}
-      <div className="fixed top-24 right-4 z-[1001]">
+      <div className={`fixed ${scene3DUrl ? 'top-16' : 'top-4'} right-4 z-[1001]`}>
         <button
           onClick={() => setShowLayerMenu(!showLayerMenu)}
           className="bg-white rounded-full p-3 shadow-lg hover:shadow-xl transition-all hover:scale-105 touch-manipulation text-gray-700"
@@ -1421,6 +1662,113 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
                   </svg>
                 )}
               </button>
+              <button
+                onClick={() => switchBaseLayer('satellite')}
+                className={`w-full text-left px-4 py-3 hover:bg-gray-50 transition-colors flex items-center justify-between border-t border-gray-100 ${
+                  activeBaseLayer === 'satellite' ? 'bg-blue-50 text-blue-600' : 'text-gray-700'
+                }`}
+              >
+                <span className="font-medium">🛰️ Satellite</span>
+                {activeBaseLayer === 'satellite' && (
+                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                  </svg>
+                )}
+              </button>
+              
+              {/* Hillshade Overlay Toggle */}
+              <div className="border-t border-gray-200 pt-2 mt-2">
+                <div className="px-4 py-1 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                  Terrain Overlay
+                </div>
+                <button
+                  onClick={toggleHillshade}
+                  className={`w-full text-left px-4 py-3 hover:bg-gray-50 transition-colors flex items-center justify-between ${
+                    showHillshade ? 'bg-green-50 text-green-700' : 'text-gray-700'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                    </svg>
+                    <span className="font-medium">Hillshade</span>
+                  </div>
+                  <div className={`w-10 h-5 rounded-full transition-colors ${showHillshade ? 'bg-green-500' : 'bg-gray-300'}`}>
+                    <div className={`w-4 h-4 bg-white rounded-full shadow transform transition-transform mt-0.5 ${showHillshade ? 'translate-x-5 ml-0.5' : 'translate-x-0.5'}`} />
+                  </div>
+                </button>
+                
+                {/* Hillshade Type Selector - only show when hillshade is enabled */}
+                {showHillshade && (
+                  <div className="px-4 py-2 bg-gray-50 border-t border-gray-100">
+                    <div className="text-xs text-gray-500 mb-2">Terrain Style:</div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <button
+                        onClick={() => switchHillshadeType('esri')}
+                        className={`px-2 py-1.5 text-xs font-medium rounded transition-colors ${
+                          hillshadeType === 'esri' 
+                            ? 'bg-green-600 text-white' 
+                            : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-100'
+                        }`}
+                        title="Standard ESRI hillshade - varies by region"
+                      >
+                        ESRI
+                      </button>
+                      <button
+                        onClick={() => switchHillshadeType('esri-dark')}
+                        className={`px-2 py-1.5 text-xs font-medium rounded transition-colors ${
+                          hillshadeType === 'esri-dark' 
+                            ? 'bg-green-600 text-white' 
+                            : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-100'
+                        }`}
+                        title="Darker ESRI hillshade - better contrast"
+                      >
+                        ESRI Dark
+                      </button>
+                      <button
+                        onClick={() => switchHillshadeType('esri-terrain3d')}
+                        className={`px-2 py-1.5 text-xs font-medium rounded transition-colors ${
+                          hillshadeType === 'esri-terrain3d' 
+                            ? 'bg-green-600 text-white' 
+                            : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-100'
+                        }`}
+                        title="Dynamic terrain from elevation data - high resolution"
+                      >
+                        Terrain3D ⭐
+                      </button>
+                      <button
+                        onClick={() => switchHillshadeType('esri-shaded')}
+                        className={`px-2 py-1.5 text-xs font-medium rounded transition-colors ${
+                          hillshadeType === 'esri-shaded' 
+                            ? 'bg-green-600 text-white' 
+                            : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-100'
+                        }`}
+                        title="Colored shaded relief - shows elevation"
+                      >
+                        Shaded
+                      </button>
+                      <button
+                        onClick={() => switchHillshadeType('stadia')}
+                        className={`col-span-2 px-2 py-1.5 text-xs font-medium rounded transition-colors ${
+                          hillshadeType === 'stadia' 
+                            ? 'bg-green-600 text-white' 
+                            : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-100'
+                        }`}
+                        title="Stadia terrain - consistent quality"
+                      >
+                        Stadia (Consistent)
+                      </button>
+                    </div>
+                    <div className="text-xs text-gray-400 mt-2">
+                      {hillshadeType === 'esri' && '☀️ Standard hillshade - varies by region'}
+                      {hillshadeType === 'esri-dark' && '🌑 Darker hillshade - better visibility'}
+                      {hillshadeType === 'esri-terrain3d' && '🏔️ Dynamic elevation data - best quality!'}
+                      {hillshadeType === 'esri-shaded' && '🎨 Colored relief - shows elevation bands'}
+                      {hillshadeType === 'stadia' && '🗺️ Artistic terrain - consistent everywhere'}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </>
         )}
@@ -1429,7 +1777,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       {/* Location Tracking Button */}
       <button
         onClick={toggleLocationTracking}
-        className={`fixed top-32 right-4 z-[1001] rounded-full p-3 shadow-lg hover:shadow-xl transition-all hover:scale-105 touch-manipulation ${
+        className={`fixed ${scene3DUrl ? 'top-28' : 'top-16'} right-4 z-[1001] rounded-full p-3 shadow-lg hover:shadow-xl transition-all hover:scale-105 touch-manipulation ${
           isTrackingLocation 
             ? 'bg-blue-500 text-white' 
             : 'bg-white text-gray-700 hover:bg-gray-50'
@@ -1452,7 +1800,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
 
       {/* Speed Display Widget */}
       {isTrackingLocation && (
-        <div className="fixed top-40 right-4 z-[1001] bg-white rounded-lg shadow-lg px-4 py-3 min-w-[120px]">
+        <div className={`fixed ${scene3DUrl ? 'top-40' : 'top-28'} right-4 z-[1001] bg-white rounded-lg shadow-lg px-4 py-3 min-w-[120px]`}>
           <div className="flex items-center gap-2">
             <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
@@ -1477,7 +1825,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       {/* Location Error Message */}
       {locationError && (
         <div className={`fixed right-4 z-[1002] bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-lg shadow-lg max-w-xs ${
-          isTrackingLocation ? 'top-52' : 'top-40'
+          isTrackingLocation ? (scene3DUrl ? 'top-52' : 'top-40') : (scene3DUrl ? 'top-40' : 'top-28')
         }`}>
           <div className="flex items-start gap-2">
             <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

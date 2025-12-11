@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server'
 import { redirect, notFound } from 'next/navigation'
 import { Sign, Resort, SkiFeature } from '@/lib/utils/types'
 import MapPageWrapper from '@/components/game/MapPageWrapper'
+import { autoJoinResortIfNeeded } from '@/lib/utils/auto-join-resort'
 
 export default async function MapPage({
   params,
@@ -33,6 +34,10 @@ export default async function MapPage({
   if (!resort) {
     notFound()
   }
+
+  // Automatically join resort if user hasn't joined yet
+  // This allows users to access any resort's game, and we track which ones they've played
+  await autoJoinResortIfNeeded(resort.id)
 
   // Get signs
   const { data: signs } = await supabase
