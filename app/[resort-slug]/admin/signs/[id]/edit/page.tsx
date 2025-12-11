@@ -1,17 +1,19 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter, useParams } from 'next/navigation'
-import { Sign } from '@/lib/utils/types'
+import { parseSignFormData } from '@/lib/validations/sign'
 
 export default function EditSignPage() {
   const router = useRouter()
   const params = useParams()
-  const supabase = createClient()
+  // Create Supabase client once using useMemo to prevent recreation on each render
+  const supabase = useMemo(() => createClient(), [])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [gettingLocation, setGettingLocation] = useState(false)
   const [locationError, setLocationError] = useState<string | null>(null)
   
@@ -27,11 +29,7 @@ export default function EditSignPage() {
     active: true,
   })
 
-  useEffect(() => {
-    loadSign()
-  }, [])
-
-  const loadSign = async () => {
+  const loadSign = useCallback(async () => {
     try {
       const signId = params.id as string
       const { data: sign, error: signError } = await supabase
@@ -53,17 +51,41 @@ export default function EditSignPage() {
         order_index: sign.order_index || 0,
         active: sign.active,
       })
-    } catch (err: any) {
-      setError(err.message || 'Failed to load sign')
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to load sign'
+      setError(message)
     } finally {
       setLoading(false)
     }
-  }
+  }, [params.id, supabase])
+
+  useEffect(() => {
+    loadSign()
+  }, [loadSign])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setSaving(true)
     setError(null)
+    setFieldErrors({})
+
+    // Validate form data using Zod schema
+    const validationResult = parseSignFormData(formData)
+    
+    if (!validationResult.success) {
+      // Extract field-level errors
+      const errors: Record<string, string> = {}
+      validationResult.error.issues.forEach((issue) => {
+        const field = issue.path[0]?.toString() || 'form'
+        errors[field] = issue.message
+      })
+      setFieldErrors(errors)
+      setError('Please fix the validation errors below')
+      setSaving(false)
+      return
+    }
+
+    const validatedData = validationResult.data
 
     try {
       const signId = params.id as string
@@ -72,23 +94,24 @@ export default function EditSignPage() {
       const { error: updateError } = await supabase
         .from('signs')
         .update({
-          name: formData.name,
-          description: formData.description || null,
-          hint: formData.hint || null,
-          qr_code: formData.qr_code,
-          lat: parseFloat(formData.lat),
-          lng: parseFloat(formData.lng),
-          difficulty: formData.difficulty,
-          order_index: formData.order_index,
-          active: formData.active,
+          name: validatedData.name,
+          description: validatedData.description,
+          hint: validatedData.hint,
+          qr_code: validatedData.qr_code,
+          lat: validatedData.lat,
+          lng: validatedData.lng,
+          difficulty: validatedData.difficulty,
+          order_index: validatedData.order_index,
+          active: validatedData.active,
         })
         .eq('id', signId)
 
       if (updateError) throw updateError
 
       router.push(`/${resortSlug}/admin/signs`)
-    } catch (err: any) {
-      setError(err.message || 'Failed to update sign')
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to update sign'
+      setError(message)
     } finally {
       setSaving(false)
     }
@@ -112,11 +135,6 @@ export default function EditSignPage() {
           lng: longitude.toFixed(8),
         })
         setGettingLocation(false)
-        
-        // Show accuracy info (optional - you could display this in a tooltip or message)
-        if (accuracy) {
-          console.log(`GPS accuracy: ${accuracy.toFixed(1)} meters`)
-        }
       },
       (error) => {
         setGettingLocation(false)

@@ -1,8 +1,9 @@
+import Image from 'next/image'
 import { createClient } from '@/lib/supabase/server'
 import { notFound, redirect } from 'next/navigation'
 import { Sign } from '@/lib/utils/types'
 import Link from 'next/link'
-import QRScanner from '@/components/game/QRScanner'
+import LazyQRScanner from '@/components/game/LazyQRScanner'
 
 export default async function SignDetailPage({
   params,
@@ -64,11 +65,13 @@ export default async function SignDetailPage({
           )}
 
           {sign.photo_url && (
-            <div className="mb-4">
-              <img
+            <div className="mb-4 relative w-full aspect-video">
+              <Image
                 src={sign.photo_url}
                 alt={sign.name}
-                className="w-full rounded-lg"
+                fill
+                className="rounded-lg object-cover"
+                unoptimized
               />
             </div>
           )}
@@ -86,7 +89,7 @@ export default async function SignDetailPage({
         {!isFound && (
           <div className="bg-white rounded-lg shadow p-6">
             <h2 className="text-xl font-bold mb-4">Scan QR Code</h2>
-            <QRScanner resortSlug={resolvedParams['resort-slug']} signId={resolvedParams.id} />
+            <LazyQRScanner resortSlug={resolvedParams['resort-slug']} signId={resolvedParams.id} />
           </div>
         )}
       </div>

@@ -1,16 +1,19 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter, useParams } from 'next/navigation'
 import { v4 as uuidv4 } from 'uuid'
+import { parseSignFormData } from '@/lib/validations/sign'
 
 export default function NewSignPage() {
   const router = useRouter()
   const params = useParams()
-  const supabase = createClient()
+  // Create Supabase client once using useMemo to prevent recreation on each render
+  const supabase = useMemo(() => createClient(), [])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [gettingLocation, setGettingLocation] = useState(false)
   const [locationError, setLocationError] = useState<string | null>(null)
   
@@ -30,6 +33,25 @@ export default function NewSignPage() {
     e.preventDefault()
     setLoading(true)
     setError(null)
+    setFieldErrors({})
+
+    // Validate form data using Zod schema
+    const validationResult = parseSignFormData(formData)
+    
+    if (!validationResult.success) {
+      // Extract field-level errors
+      const errors: Record<string, string> = {}
+      validationResult.error.issues.forEach((issue) => {
+        const field = issue.path[0]?.toString() || 'form'
+        errors[field] = issue.message
+      })
+      setFieldErrors(errors)
+      setError('Please fix the validation errors below')
+      setLoading(false)
+      return
+    }
+
+    const validatedData = validationResult.data
 
     try {
       const resortSlug = params['resort-slug'] as string
@@ -49,22 +71,23 @@ export default function NewSignPage() {
         .from('signs')
         .insert({
           resort_id: resort.id,
-          name: formData.name,
-          description: formData.description || null,
-          hint: formData.hint || null,
-          qr_code: formData.qr_code,
-          lat: parseFloat(formData.lat),
-          lng: parseFloat(formData.lng),
-          difficulty: formData.difficulty,
-          order_index: formData.order_index,
-          active: formData.active,
+          name: validatedData.name,
+          description: validatedData.description,
+          hint: validatedData.hint,
+          qr_code: validatedData.qr_code,
+          lat: validatedData.lat,
+          lng: validatedData.lng,
+          difficulty: validatedData.difficulty,
+          order_index: validatedData.order_index,
+          active: validatedData.active,
         })
 
       if (insertError) throw insertError
 
       router.push(`/${resortSlug}/admin/signs`)
-    } catch (err: any) {
-      setError(err.message || 'Failed to create sign')
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to create sign'
+      setError(message)
     } finally {
       setLoading(false)
     }
@@ -85,18 +108,13 @@ export default function NewSignPage() {
 
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        const { latitude, longitude, accuracy } = position.coords
+        const { latitude, longitude } = position.coords
         setFormData({
           ...formData,
           lat: latitude.toFixed(8),
           lng: longitude.toFixed(8),
         })
         setGettingLocation(false)
-        
-        // Show accuracy info (optional - you could display this in a tooltip or message)
-        if (accuracy) {
-          console.log(`GPS accuracy: ${accuracy.toFixed(1)} meters`)
-        }
       },
       (error) => {
         setGettingLocation(false)
@@ -144,10 +162,16 @@ export default function NewSignPage() {
             type="text"
             id="name"
             required
+            maxLength={100}
             value={formData.name}
             onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-            className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+            className={`mt-1 block w-full px-3 py-2 border rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 ${
+              fieldErrors.name ? 'border-red-500' : 'border-gray-300'
+            }`}
           />
+          {fieldErrors.name && (
+            <p className="mt-1 text-sm text-red-600">{fieldErrors.name}</p>
+          )}
         </div>
 
         <div>
@@ -157,10 +181,16 @@ export default function NewSignPage() {
           <textarea
             id="description"
             rows={3}
+            maxLength={500}
             value={formData.description}
             onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-            className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+            className={`mt-1 block w-full px-3 py-2 border rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 ${
+              fieldErrors.description ? 'border-red-500' : 'border-gray-300'
+            }`}
           />
+          {fieldErrors.description && (
+            <p className="mt-1 text-sm text-red-600">{fieldErrors.description}</p>
+          )}
         </div>
 
         <div>
@@ -170,11 +200,17 @@ export default function NewSignPage() {
           <textarea
             id="hint"
             rows={2}
+            maxLength={200}
             value={formData.hint}
             onChange={(e) => setFormData({ ...formData, hint: e.target.value })}
-            className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+            className={`mt-1 block w-full px-3 py-2 border rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 ${
+              fieldErrors.hint ? 'border-red-500' : 'border-gray-300'
+            }`}
             placeholder="Hint to help users find this sign"
           />
+          {fieldErrors.hint && (
+            <p className="mt-1 text-sm text-red-600">{fieldErrors.hint}</p>
+          )}
         </div>
 
         <div>
@@ -186,9 +222,12 @@ export default function NewSignPage() {
               type="text"
               id="qr_code"
               required
+              maxLength={100}
               value={formData.qr_code}
               onChange={(e) => setFormData({ ...formData, qr_code: e.target.value })}
-              className="flex-1 block w-full px-3 py-2 border border-gray-300 rounded-l-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 font-mono text-sm"
+              className={`flex-1 block w-full px-3 py-2 border rounded-l-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 font-mono text-sm ${
+                fieldErrors.qr_code ? 'border-red-500' : 'border-gray-300'
+              }`}
             />
             <button
               type="button"
@@ -198,6 +237,9 @@ export default function NewSignPage() {
               Generate New
             </button>
           </div>
+          {fieldErrors.qr_code && (
+            <p className="mt-1 text-sm text-red-600">{fieldErrors.qr_code}</p>
+          )}
         </div>
 
         <div>
@@ -245,11 +287,18 @@ export default function NewSignPage() {
                 id="lat"
                 required
                 step="any"
+                min="-90"
+                max="90"
                 value={formData.lat}
                 onChange={(e) => setFormData({ ...formData, lat: e.target.value })}
-                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                className={`mt-1 block w-full px-3 py-2 border rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 ${
+                  fieldErrors.lat ? 'border-red-500' : 'border-gray-300'
+                }`}
                 placeholder="39.8283"
               />
+              {fieldErrors.lat && (
+                <p className="mt-1 text-sm text-red-600">{fieldErrors.lat}</p>
+              )}
             </div>
             <div>
               <label htmlFor="lng" className="block text-sm font-medium text-gray-700">
@@ -260,11 +309,18 @@ export default function NewSignPage() {
                 id="lng"
                 required
                 step="any"
+                min="-180"
+                max="180"
                 value={formData.lng}
                 onChange={(e) => setFormData({ ...formData, lng: e.target.value })}
-                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                className={`mt-1 block w-full px-3 py-2 border rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 ${
+                  fieldErrors.lng ? 'border-red-500' : 'border-gray-300'
+                }`}
                 placeholder="-98.5795"
               />
+              {fieldErrors.lng && (
+                <p className="mt-1 text-sm text-red-600">{fieldErrors.lng}</p>
+              )}
             </div>
           </div>
           <p className="mt-1 text-xs text-gray-500">

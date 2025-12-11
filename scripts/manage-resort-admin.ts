@@ -146,7 +146,7 @@ async function listUserResorts(userEmail: string) {
   // Check if super admin
   const { data: metadata } = await supabase
     .from('user_metadata')
-    .select('is_admin')
+    .select('is_admin, resort_id')
     .eq('id', user.id)
     .single()
 

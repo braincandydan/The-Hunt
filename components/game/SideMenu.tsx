@@ -1,9 +1,11 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { createClient } from '@/lib/supabase/client'
+import { useState, memo } from 'react'
+import Image from 'next/image'
+import Link from 'next/link'
 import { Resort } from '@/lib/utils/types'
 import UserProfile from './UserProfile'
+import { useBodyScrollLock } from '@/lib/hooks/useBodyScrollLock'
 
 interface SideMenuProps {
   resort: Resort
@@ -11,20 +13,11 @@ interface SideMenuProps {
   onClose: () => void
 }
 
-export default function SideMenu({ resort, isOpen, onClose }: SideMenuProps) {
+function SideMenu({ resort, isOpen, onClose }: SideMenuProps) {
   const [showProfile, setShowProfile] = useState(false)
 
   // Prevent body scroll when menu is open
-  useEffect(() => {
-    if (isOpen) {
-      document.body.style.overflow = 'hidden'
-    } else {
-      document.body.style.overflow = ''
-    }
-    return () => {
-      document.body.style.overflow = ''
-    }
-  }, [isOpen])
+  useBodyScrollLock(isOpen)
 
   return (
     <>
@@ -58,11 +51,14 @@ export default function SideMenu({ resort, isOpen, onClose }: SideMenuProps) {
               </button>
             </div>
             {resort.theme_config?.logoUrl && (
-              <div className="mt-4">
-                <img
+              <div className="mt-4 relative h-12">
+                <Image
                   src={resort.theme_config.logoUrl}
                   alt={`${resort.name} logo`}
+                  height={48}
+                  width={200}
                   className="h-12 w-auto object-contain"
+                  unoptimized
                 />
               </div>
             )}
@@ -89,11 +85,9 @@ export default function SideMenu({ resort, isOpen, onClose }: SideMenuProps) {
             ) : (
               <div className="p-4 space-y-2">
                 <button
-                  onClick={() => {
-                    // Placeholder - no action yet
-                    console.log('Resort Info clicked')
-                  }}
+                  type="button"
                   className="w-full text-left px-4 py-3 rounded-lg hover:bg-gray-50 transition flex items-center space-x-3"
+                  aria-label="Resort Info (coming soon)"
                 >
                   <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -102,17 +96,31 @@ export default function SideMenu({ resort, isOpen, onClose }: SideMenuProps) {
                 </button>
 
                 <button
-                  onClick={() => {
-                    // Placeholder - no action yet
-                    console.log('Contact Ski Patrol clicked')
-                  }}
+                  type="button"
                   className="w-full text-left px-4 py-3 rounded-lg hover:bg-gray-50 transition flex items-center space-x-3"
+                  aria-label="Contact Ski Patrol (coming soon)"
                 >
                   <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
                   </svg>
                   <span className="font-medium text-gray-700">Contact Ski Patrol</span>
                 </button>
+
+                <div className="border-t border-gray-200 my-4" />
+                
+                <Link
+                  href={`/${resort.slug}/game/history`}
+                  onClick={onClose}
+                  className="w-full text-left px-4 py-3 rounded-lg hover:bg-gray-50 transition flex items-center space-x-3"
+                >
+                  <svg className="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                  </svg>
+                  <div>
+                    <span className="font-medium text-gray-700">Session History</span>
+                    <p className="text-xs text-gray-500">View your skiing activity</p>
+                  </div>
+                </Link>
 
                 <div className="border-t border-gray-200 my-4" />
 
@@ -134,3 +142,4 @@ export default function SideMenu({ resort, isOpen, onClose }: SideMenuProps) {
   )
 }
 
+export default memo(SideMenu)

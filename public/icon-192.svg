@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#4f46e5"/>
+    </linearGradient>
+    <linearGradient id="snow" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#ffffff"/>
+      <stop offset="100%" style="stop-color:#e5e7eb"/>
+    </linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect width="192" height="192" rx="38.400000000000006" fill="url(#bg)"/>
+  <!-- Mountain -->
+  <polygon points="28.799999999999997,144 96,48 163.2,144" fill="url(#snow)"/>
+  <!-- Snow cap -->
+  <polygon points="67.19999999999999,96 96,48 124.80000000000001,96 105.60000000000001,86.4 96,67.19999999999999 86.4,86.4" fill="#ffffff"/>
+  <!-- Ski trail -->
+  <path d="M 57.599999999999994 115.19999999999999 Q 96 105.60000000000001 134.39999999999998 124.80000000000001" stroke="#6366f1" stroke-width="5.76" fill="none" stroke-linecap="round"/>
+  <path d="M 67.19999999999999 130.56 Q 105.60000000000001 119.03999999999999 144 138.24" stroke="#4f46e5" stroke-width="4.800000000000001" fill="none" stroke-linecap="round"/>
+</svg>

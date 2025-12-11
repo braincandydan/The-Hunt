@@ -1,7 +1,10 @@
 'use client'
 
+import Image from 'next/image'
 import { Sign } from '@/lib/utils/types'
-import QRScanner from './QRScanner'
+import { useRouter } from 'next/navigation'
+import { useBodyScrollLock } from '@/lib/hooks/useBodyScrollLock'
+import LazyQRScanner from './LazyQRScanner'
 
 interface SignDetailModalProps {
   sign: Sign | null
@@ -20,16 +23,11 @@ export default function SignDetailModal({
   isFound,
   onSignFound,
 }: SignDetailModalProps) {
-  if (!sign || !isOpen) return null
+  const router = useRouter()
+  // Properly prevent body scroll when modal is open with cleanup
+  useBodyScrollLock(isOpen)
 
-  // Prevent body scroll when modal is open
-  if (typeof window !== 'undefined') {
-    if (isOpen) {
-      document.body.style.overflow = 'hidden'
-    } else {
-      document.body.style.overflow = ''
-    }
-  }
+  if (!sign || !isOpen) return null
 
   return (
     <>
@@ -76,11 +74,13 @@ export default function SignDetailModal({
             )}
 
             {sign.photo_url && (
-              <div>
-                <img
+              <div className="relative w-full aspect-video">
+                <Image
                   src={sign.photo_url}
                   alt={sign.name}
-                  className="w-full rounded-lg"
+                  fill
+                  className="rounded-lg object-cover"
+                  unoptimized
                 />
               </div>
             )}
@@ -99,17 +99,17 @@ export default function SignDetailModal({
             {!isFound && (
               <div className="pt-4 border-t border-gray-200">
                 <h3 className="text-sm font-semibold text-gray-700 mb-3">Scan QR Code</h3>
-                <QRScanner
+                <LazyQRScanner
                   resortSlug={resortSlug}
                   signId={sign.id}
                   onSuccess={() => {
                     if (onSignFound) {
                       onSignFound()
                     }
-                    // Close modal and refresh after delay
+                    // Close modal and refresh server data after delay
                     setTimeout(() => {
                       onClose()
-                      window.location.reload()
+                      router.refresh()
                     }, 1500)
                   }}
                 />

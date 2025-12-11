@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 
@@ -14,14 +14,11 @@ export default function UserProfile({ onClose }: UserProfileProps) {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const supabase = createClient()
+  // Create Supabase client once using useMemo to prevent recreation on each render
+  const supabase = useMemo(() => createClient(), [])
   const router = useRouter()
 
-  useEffect(() => {
-    loadUserData()
-  }, [])
-
-  const loadUserData = async () => {
+  const loadUserData = useCallback(async () => {
     try {
       const {
         data: { user },
@@ -43,10 +40,14 @@ export default function UserProfile({ onClose }: UserProfileProps) {
           setDisplayName(user.email?.split('@')[0] || '')
         }
       }
-    } catch (err) {
-      console.error('Error loading user data:', err)
+    } catch {
+      // Failed to load user data, continue with defaults
     }
-  }
+  }, [supabase])
+
+  useEffect(() => {
+    loadUserData()
+  }, [loadUserData])
 
   const handleSave = async () => {
     setSaving(true)
@@ -73,8 +74,9 @@ export default function UserProfile({ onClose }: UserProfileProps) {
       if (onClose) {
         onClose()
       }
-    } catch (err: any) {
-      setError(err.message || 'Failed to save')
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to save'
+      setError(message)
     } finally {
       setSaving(false)
     }

@@ -1,16 +1,19 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
+import Image from 'next/image'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter, useParams } from 'next/navigation'
 
 export default function AdminSettingsPage() {
   const router = useRouter()
   const params = useParams()
-  const supabase = createClient()
+  // Create Supabase client once using useMemo to prevent recreation on each render
+  const supabase = useMemo(() => createClient(), [])
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [successMessage, setSuccessMessage] = useState<string | null>(null)
   
   const [themeConfig, setThemeConfig] = useState({
     primaryColor: '#6366f1',
@@ -19,11 +22,7 @@ export default function AdminSettingsPage() {
     logoUrl: '',
   })
 
-  useEffect(() => {
-    loadResortSettings()
-  }, [])
-
-  const loadResortSettings = async () => {
+  const loadResortSettings = useCallback(async () => {
     setLoading(true)
     try {
       const resortSlug = params['resort-slug'] as string
@@ -41,12 +40,17 @@ export default function AdminSettingsPage() {
           logoUrl: resort.theme_config.logoUrl || '',
         })
       }
-    } catch (err: any) {
-      setError(err.message)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to load settings'
+      setError(message)
     } finally {
       setLoading(false)
     }
-  }
+  }, [params, supabase])
+
+  useEffect(() => {
+    loadResortSettings()
+  }, [loadResortSettings])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -75,9 +79,12 @@ export default function AdminSettingsPage() {
         }
       }
 
-      alert('Settings saved successfully!')
-    } catch (err: any) {
-      setError(err.message || 'Failed to save settings')
+      setSuccessMessage('Settings saved successfully!')
+      // Clear success message after 3 seconds
+      setTimeout(() => setSuccessMessage(null), 3000)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to save settings'
+      setError(message)
     } finally {
       setSaving(false)
     }
@@ -97,6 +104,12 @@ export default function AdminSettingsPage() {
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-4">
           {error}
+        </div>
+      )}
+      
+      {successMessage && (
+        <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded mb-4">
+          {successMessage}
         </div>
       )}
 
@@ -182,14 +195,14 @@ export default function AdminSettingsPage() {
                 URL to your resort logo image
               </p>
               {themeConfig.logoUrl && (
-                <div className="mt-2">
-                  <img
+                <div className="mt-2 relative h-16">
+                  <Image
                     src={themeConfig.logoUrl}
                     alt="Logo preview"
-                    className="h-16 object-contain"
-                    onError={(e) => {
-                      (e.target as HTMLImageElement).style.display = 'none'
-                    }}
+                    height={64}
+                    width={200}
+                    className="h-16 w-auto object-contain"
+                    unoptimized
                   />
                 </div>
               )}

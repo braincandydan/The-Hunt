@@ -1,10 +1,10 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useMemo } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls, PerspectiveCamera, Billboard, Text } from '@react-three/drei'
 import * as THREE from 'three'
-import { Sign } from '@/lib/utils/types'
+import { Sign, GeoJSONGeometry } from '@/lib/utils/types'
 import TerrainMesh from './TerrainMesh'
 import { 
   loadSceneMetadata, 
@@ -100,9 +100,9 @@ interface MapView3DProps {
     name: string
     type: 'trail' | 'lift' | 'boundary' | 'area' | 'road'
     difficulty?: string
-    geometry: any // GeoJSON geometry
+    geometry: GeoJSONGeometry
     status?: string
-    metadata?: any
+    metadata?: Record<string, unknown>
   }>
   resortName?: string
   onSpeedUpdate?: (speedData: { current: number | null; top: number; average: number }) => void
@@ -495,11 +495,6 @@ function CameraController({ terrainMesh, controlsRef }: { terrainMesh: THREE.Mes
           controlsRef.current.target.copy(center)
           controlsRef.current.update()
         }
-        
-        console.log('Camera positioned at:', camera.position.toArray())
-        console.log('Looking at mesh center:', center.toArray())
-        console.log('Terrain size:', size.toArray())
-        console.log('Max dimension:', maxDim)
       }
     } else {
       // Fallback: look at origin
@@ -874,21 +869,25 @@ function Scene3D({
 
   // Load scene metadata
   useEffect(() => {
-    loadSceneMetadata('/3d-map/data/index/scene.json').then(setSceneMetadata).catch(console.error)
+    loadSceneMetadata('/3d-map/data/index/scene.json').then(setSceneMetadata).catch(() => {
+      // Scene metadata load failed, 3D view may not work correctly
+    })
   }, [])
 
   // Load test GeoJSON (TreeBackground - first few polygons only for testing)
   useEffect(() => {
     loadGeoJSONFile('/3d-map/geojson/TreeBackground.geojson')
       .then((data) => {
-        console.log('GeoJSON loaded:', data.features.length, 'features')
+        if (!data) return
         // Limit to first 10 features for testing performance
         setTestGeoJSON({
-          ...data,
+          type: 'FeatureCollection',
           features: data.features.slice(0, 10)
         })
       })
-      .catch(console.error)
+      .catch(() => {
+        // GeoJSON load failed, continue without it
+      })
   }, [])
 
   return (
@@ -900,7 +899,6 @@ function Scene3D({
           onLoaded={(mesh) => {
             terrainMeshRef.current = mesh
             setTerrainLoaded(true) // Trigger re-render so GeoJSON can drape
-            console.log('Terrain mesh loaded, ready for GeoJSON draping')
           }}
         />
       )}
@@ -978,13 +976,44 @@ export default function MapView3D({
   const terrainMeshRef = useRef<THREE.Mesh | null>(null)
   const controlsRef = useRef<any>(null)
 
-  // Calculate center from signs or use provided/default
-  const mapCenter: [number, number] = center || (signs.length > 0
-    ? [
+  // Calculate center from signs, ski features, or use provided center
+  const mapCenter: [number, number] = useMemo(() => {
+    // Use provided center if available
+    if (center) return center
+    
+    // Calculate from signs if available
+    if (signs.length > 0) {
+      return [
         signs.reduce((sum, s) => sum + parseFloat(s.lat.toString()), 0) / signs.length,
         signs.reduce((sum, s) => sum + parseFloat(s.lng.toString()), 0) / signs.length,
       ]
-    : [49.73283, -118.9412])
+    }
+    
+    // Calculate from ski features if available
+    if (skiFeatures && skiFeatures.length > 0) {
+      const firstFeature = skiFeatures[0]
+      if (firstFeature.geometry?.coordinates) {
+        try {
+          const coords = firstFeature.geometry.type === 'LineString'
+            ? firstFeature.geometry.coordinates
+            : firstFeature.geometry.type === 'Polygon'
+              ? firstFeature.geometry.coordinates[0]
+              : []
+          if (coords.length > 0) {
+            const avgLng = coords.reduce((sum: number, c: number[]) => sum + c[0], 0) / coords.length
+            const avgLat = coords.reduce((sum: number, c: number[]) => sum + c[1], 0) / coords.length
+            return [avgLat, avgLng] as [number, number]
+          }
+        } catch {
+          // Fall through to default
+        }
+      }
+    }
+    
+    // No data available - return a neutral center (0,0)
+    // The camera will be repositioned when terrain loads
+    return [0, 0]
+  }, [center, signs, skiFeatures])
 
   // Location tracking (similar to 2D map)
   useEffect(() => {
@@ -1024,8 +1053,7 @@ export default function MapView3D({
           setUserSpeed(null)
         }
       },
-      (error) => {
-        console.error('Geolocation error:', error)
+      () => {
         setLocationError('Unable to get your location')
         setIsTrackingLocation(false)
       },
@@ -1085,78 +1113,7 @@ export default function MapView3D({
     }
   }
 
-  // Removed iframe mode - using custom terrain mesh instead
-  // Custom 3D scene with terrain mesh and all features
-  if (false) {
-    return (
-      <div className="relative w-full h-full">
-        {/* QGIS 3D terrain in iframe - behind everything */}
-        <iframe
-          src={sceneUrl}
-          className="w-full h-full border-0"
-          title="3D Map"
-          allow="accelerometer; gyroscope; geolocation"
-          style={{ position: 'absolute', zIndex: 0 }}
-        />
-        
-        {/* Transparent overlay canvas for features - on top of iframe */}
-        <div className="absolute inset-0 z-10" style={{ pointerEvents: 'none' }}>
-          <Canvas
-            style={{ background: 'transparent' }}
-            gl={{ alpha: true, antialias: true, preserveDrawingBuffer: true }}
-            camera={{ position: [0, 800, 1500], fov: 50 }}
-          >
-            <OrbitControls
-              enablePan={false}
-              enableZoom={false}
-              enableRotate={false}
-            />
-            <Scene3D
-              signs={signs}
-              discoveredSignIds={discoveredSignIds}
-              resortSlug={resortSlug}
-              skiFeatures={skiFeatures}
-              center={mapCenter}
-              elevationScale={elevationScale}
-              sceneUrl={sceneUrl}
-              userLocation={userLocation}
-              terrainMeshRef={terrainMeshRef}
-              additionalGeoJSONPaths={additionalGeoJSONPaths}
-            />
-          </Canvas>
-        </div>
-        
-        {/* Overlay controls */}
-        <div className="absolute top-4 right-4 z-30 flex flex-col gap-2">
-          <button
-            onClick={toggleLocationTracking}
-            className={`rounded-full p-3 shadow-lg hover:shadow-xl transition-all pointer-events-auto ${
-              isTrackingLocation
-                ? 'bg-blue-500 text-white'
-                : 'bg-white text-gray-700 hover:bg-gray-50'
-            }`}
-          >
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-          </button>
-        </div>
-
-        {/* Speed display */}
-        {isTrackingLocation && userSpeed !== null && (
-          <div className="absolute top-20 right-4 z-30 bg-white rounded-lg shadow-lg px-4 py-3 pointer-events-auto">
-            <div className="text-lg font-bold">
-              {Math.round(userSpeed)} <span className="text-sm font-normal text-gray-500">km/h</span>
-            </div>
-          </div>
-        )}
-      </div>
-    )
-  }
-
-  // React Three Fiber mode (for custom 3D scene with all features)
-  // This mode provides accurate positioning for all markers, trails, and labels
+  // React Three Fiber mode - custom 3D scene with terrain mesh, markers, and trails
   return (
     <div className="relative w-full h-full" style={{ width: '100%', height: '100%', backgroundColor: '#87CEEB', position: 'absolute', top: 0, left: 0 }}>
       <Canvas 

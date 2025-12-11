@@ -128,7 +128,6 @@ export default function TerrainMesh({ sceneUrl, onLoaded }: TerrainMeshProps) {
         setMeshData({ geometry, material })
         setLoading(false)
       } catch (err) {
-        console.error('Failed to load terrain:', err)
         setError(err instanceof Error ? err.message : 'Failed to load terrain')
         setLoading(false)
       }

@@ -1,5 +1,5 @@
 import { createClient } from '@/lib/supabase/server'
-import { redirect } from 'next/navigation'
+import { redirect, notFound } from 'next/navigation'
 import Link from 'next/link'
 
 export default async function AdminDashboard({
@@ -17,27 +17,44 @@ export default async function AdminDashboard({
     redirect('/login')
   }
 
-  // Get resort
-  const { data: resort } = await supabase
+  // Get resort - must exist to proceed
+  const { data: resort, error: resortError } = await supabase
     .from('resorts')
     .select('*')
     .eq('slug', resolvedParams['resort-slug'])
     .single()
 
-  // Get stats
+  // Guard clause: Resort must exist before we query stats
+  if (resortError || !resort) {
+    notFound()
+  }
+
+  // Get stats - now safe to use resort.id
   const { count: signsCount } = await supabase
     .from('signs')
     .select('*', { count: 'exact', head: true })
-    .eq('resort_id', resort?.id)
+    .eq('resort_id', resort.id)
 
-  const { count: discoveriesCount } = await supabase
-    .from('user_discoveries')
-    .select('*', { count: 'exact', head: true })
+  // Get sign IDs for this resort to filter discoveries
+  const { data: resortSigns } = await supabase
+    .from('signs')
+    .select('id')
+    .eq('resort_id', resort.id)
+
+  const signIds = resortSigns?.map(s => s.id) || []
+
+  // Count discoveries only for this resort's signs
+  const { count: discoveriesCount } = signIds.length > 0
+    ? await supabase
+        .from('user_discoveries')
+        .select('*', { count: 'exact', head: true })
+        .in('sign_id', signIds)
+    : { count: 0 }
 
   const { count: usersCount } = await supabase
     .from('user_metadata')
     .select('*', { count: 'exact', head: true })
-    .eq('resort_id', resort?.id)
+    .eq('resort_id', resort.id)
 
   return (
     <div className="px-4 py-6 sm:px-0">

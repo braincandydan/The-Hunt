@@ -1,5 +1,6 @@
 'use client'
 
+import { useEffect, useMemo } from 'react'
 import { Sign } from '@/lib/utils/types'
 
 interface SignsBottomSheetProps {
@@ -17,16 +18,24 @@ export default function SignsBottomSheet({
   onClose,
   onSignClick,
 }: SignsBottomSheetProps) {
-  // Prevent body scroll when sheet is open
-  if (typeof window !== 'undefined') {
+  // Prevent body scroll when sheet is open - properly handled in useEffect
+  useEffect(() => {
     if (isOpen) {
       document.body.style.overflow = 'hidden'
     } else {
       document.body.style.overflow = ''
     }
-  }
+    
+    // Cleanup on unmount
+    return () => {
+      document.body.style.overflow = ''
+    }
+  }, [isOpen])
 
-  const foundCount = signs.filter((s) => discoveredSignIds.has(s.id)).length
+  const foundCount = useMemo(
+    () => signs.filter((s) => discoveredSignIds.has(s.id)).length,
+    [signs, discoveredSignIds]
+  )
 
   return (
     <>

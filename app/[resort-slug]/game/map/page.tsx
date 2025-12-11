@@ -11,27 +11,25 @@ export default async function MapPage({
 }) {
   const resolvedParams = await params
   const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  
+  // Parallel fetch: user auth and resort data (independent queries)
+  const [userResult, resortResult] = await Promise.all([
+    supabase.auth.getUser(),
+    supabase
+      .from('resorts')
+      .select('*')
+      .eq('slug', resolvedParams['resort-slug'])
+      .maybeSingle()
+  ])
+
+  const user = userResult.data?.user
+  const { data: resort, error: resortError } = resortResult
 
   if (!user) {
     redirect(`/${resolvedParams['resort-slug']}/login`)
   }
 
-  // Get resort
-  const { data: resort, error: resortError } = await supabase
-    .from('resorts')
-    .select('*')
-    .eq('slug', resolvedParams['resort-slug'])
-    .maybeSingle()
-
-  if (resortError) {
-    console.error('Resort query error:', resortError.message || resortError)
-    notFound()
-  }
-
-  if (!resort) {
+  if (resortError || !resort) {
     notFound()
   }
 
@@ -39,29 +37,31 @@ export default async function MapPage({
   // This allows users to access any resort's game, and we track which ones they've played
   await autoJoinResortIfNeeded(resort.id)
 
-  // Get signs
-  const { data: signs } = await supabase
-    .from('signs')
-    .select('*')
-    .eq('resort_id', resort.id)
-    .eq('active', true)
-    .order('order_index', { ascending: true })
+  // Parallel fetch: signs, discoveries, and ski features (all depend on resort.id/user.id)
+  const [signsResult, discoveriesResult, skiFeaturesResult] = await Promise.all([
+    supabase
+      .from('signs')
+      .select('*')
+      .eq('resort_id', resort.id)
+      .eq('active', true)
+      .order('order_index', { ascending: true }),
+    supabase
+      .from('user_discoveries')
+      .select('sign_id')
+      .eq('user_id', user.id),
+    supabase
+      .from('ski_features')
+      .select('id, name, type, difficulty, geometry, status')
+      .eq('resort_id', resort.id)
+      .eq('active', true)
+      .order('order_index', { ascending: true })
+  ])
 
-  // Get user discoveries
-  const { data: discoveries } = await supabase
-    .from('user_discoveries')
-    .select('sign_id')
-    .eq('user_id', user.id)
+  const signs = signsResult.data
+  const discoveries = discoveriesResult.data
+  const skiFeatures = skiFeaturesResult.data
 
   const discoveredSignIds = new Set(discoveries?.map((d) => d.sign_id) || [])
-
-  // Get ski features (trails, lifts, boundaries)
-  const { data: skiFeatures } = await supabase
-    .from('ski_features')
-    .select('id, name, type, difficulty, geometry, status')
-    .eq('resort_id', resort.id)
-    .eq('active', true)
-    .order('order_index', { ascending: true })
 
   return (
     <MapPageWrapper

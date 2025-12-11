@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter, usePathname } from 'next/navigation'
 
@@ -9,10 +9,12 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [successMessage, setSuccessMessage] = useState<string | null>(null)
   const [resortSlug, setResortSlug] = useState<string | null>(null)
   const router = useRouter()
   const pathname = usePathname()
-  const supabase = createClient()
+  // Create Supabase client once using useMemo to prevent recreation on each render
+  const supabase = useMemo(() => createClient(), [])
 
   // Extract resort slug from URL if present (e.g., /vail-resort/login)
   useEffect(() => {
@@ -44,8 +46,9 @@ export default function LoginPage() {
 
       router.push(getRedirectPath())
       router.refresh()
-    } catch (err: any) {
-      setError(err.message || 'An error occurred')
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'An error occurred'
+      setError(message)
     } finally {
       setLoading(false)
     }
@@ -106,9 +109,10 @@ export default function LoginPage() {
         }
       }
 
-      alert('Check your email for the confirmation link!')
-    } catch (err: any) {
-      setError(err.message || 'An error occurred')
+      setSuccessMessage('Check your email for the confirmation link!')
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'An error occurred'
+      setError(message)
     } finally {
       setLoading(false)
     }
@@ -127,6 +131,11 @@ export default function LoginPage() {
           {error && (
             <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded">
               {error}
+            </div>
+          )}
+          {successMessage && (
+            <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded">
+              {successMessage}
             </div>
           )}
           <div className="space-y-4">

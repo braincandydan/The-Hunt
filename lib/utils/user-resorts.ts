@@ -39,13 +39,17 @@ export async function getUserResorts(): Promise<Array<{
 
   if (!userResorts) return []
 
-  return userResorts.map(ur => ({
-    resort_id: ur.resort_id,
-    resort: ur.resorts as { id: string; name: string; slug: string },
-    joined_at: ur.joined_at,
-    last_activity_at: ur.last_activity_at,
-    completed: ur.completed || false,
-  }))
+  return userResorts.map(ur => {
+    // Handle the case where resorts might be an array or single object from Supabase join
+    const resort = Array.isArray(ur.resorts) ? ur.resorts[0] : ur.resorts
+    return {
+      resort_id: ur.resort_id,
+      resort: resort as { id: string; name: string; slug: string },
+      joined_at: ur.joined_at,
+      last_activity_at: ur.last_activity_at,
+      completed: ur.completed || false,
+    }
+  })
 }
 
 /**

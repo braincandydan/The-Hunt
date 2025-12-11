@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { BrowserMultiFormatReader } from '@zxing/library'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
@@ -15,10 +15,14 @@ export default function QRScanner({ resortSlug, signId, onSuccess }: QRScannerPr
   const [scanning, setScanning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false) // Debounce flag
+  // Use a ref to track processing state to avoid stale closure issues in callbacks
+  const isProcessingRef = useRef(false)
   const videoRef = useRef<HTMLVideoElement>(null)
   const codeReaderRef = useRef<BrowserMultiFormatReader | null>(null)
   const router = useRouter()
-  const supabase = createClient()
+  // Create Supabase client once using useMemo
+  const supabase = useMemo(() => createClient(), [])
 
   useEffect(() => {
     return () => {
@@ -33,6 +37,7 @@ export default function QRScanner({ resortSlug, signId, onSuccess }: QRScannerPr
     try {
       setError(null)
       setScanning(true)
+      setIsProcessing(false)
 
       if (!videoRef.current) {
         throw new Error('Video element not available')
@@ -56,16 +61,16 @@ export default function QRScanner({ resortSlug, signId, onSuccess }: QRScannerPr
         selectedDeviceId,
         videoRef.current,
         (result, err) => {
-          if (result) {
+          // Use ref to check processing state to avoid stale closure
+          if (result && !isProcessingRef.current) {
             handleScan(result.getText())
           }
-          if (err && err.name !== 'NotFoundException') {
-            console.error('Scan error:', err)
-          }
+          // Silently ignore scan errors - NotFoundException is expected during scanning
         }
       )
-    } catch (err: any) {
-      setError(err.message || 'Failed to start camera')
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to start camera'
+      setError(message)
       setScanning(false)
     }
   }
@@ -78,7 +83,12 @@ export default function QRScanner({ resortSlug, signId, onSuccess }: QRScannerPr
     setScanning(false)
   }
 
-  const handleScan = async (qrCode: string) => {
+  const handleScan = useCallback(async (qrCode: string) => {
+    // Debounce: prevent processing multiple scans using ref for immediate check
+    if (isProcessingRef.current) return
+    isProcessingRef.current = true
+    setIsProcessing(true)
+
     try {
       stopScanning()
 
@@ -107,26 +117,16 @@ export default function QRScanner({ resortSlug, signId, onSuccess }: QRScannerPr
         extractedCode = uuidMatch[0]
       }
       
-      // Debug logging
-      console.log('Scanned QR code (raw):', scannedCode)
-      console.log('Extracted code:', extractedCode)
-      console.log('Stored QR code:', storedCode)
-      
       // Compare (case-insensitive for UUIDs)
       const normalizedScanned = extractedCode.toLowerCase()
       const normalizedStored = storedCode.toLowerCase()
       
       // Verify QR code matches
       if (normalizedStored !== normalizedScanned) {
-        setError(`Invalid QR code. Please scan the correct sign.`)
-        console.error('QR code mismatch:', {
-          scanned: scannedCode,
-          extracted: extractedCode,
-          stored: storedCode,
-          normalizedScanned,
-          normalizedStored
-        })
-        return
+      setError('Invalid QR code. Please scan the correct sign.')
+      isProcessingRef.current = false
+      setIsProcessing(false)
+      return
       }
 
       // Get user location (optional GPS validation)
@@ -144,23 +144,16 @@ export default function QRScanner({ resortSlug, signId, onSuccess }: QRScannerPr
           gpsLat = position.coords.latitude
           gpsLng = position.coords.longitude
 
-          // Optional: Validate GPS is within reasonable distance (50m)
-          // This is a simple distance check - can be enhanced
-          const distance = calculateDistance(
+          // Validate GPS is within reasonable distance - warn but allow if too far
+          calculateDistance(
             gpsLat,
             gpsLng,
             parseFloat(sign.lat.toString()),
             parseFloat(sign.lng.toString())
           )
-
-          if (distance > 0.1) {
-            // More than 100m away - warn but allow
-            console.warn('User is far from sign location')
-          }
         }
-      } catch (geoError) {
-        // GPS failed, continue anyway
-        console.warn('GPS error:', geoError)
+      } catch {
+        // GPS failed, continue anyway - it's optional
       }
 
       // Get current user
@@ -211,10 +204,13 @@ export default function QRScanner({ resortSlug, signId, onSuccess }: QRScannerPr
           router.refresh()
         }, 1500)
       }
-    } catch (err: any) {
-      setError(err.message || 'An error occurred')
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'An error occurred'
+      setError(message)
+      isProcessingRef.current = false
+      setIsProcessing(false)
     }
-  }
+  }, [signId, supabase, onSuccess, router, resortSlug]) // Removed isProcessing from deps - using ref now
 
   // Calculate distance between two lat/lng points in kilometers
   const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {

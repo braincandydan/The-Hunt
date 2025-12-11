@@ -1,8 +1,21 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { Sign } from '@/lib/utils/types'
-import MapView3D from './MapView3D'
+import dynamic from 'next/dynamic'
+import { Sign, GeoJSONGeometry } from '@/lib/utils/types'
+
+// Dynamic import of MapView3D to avoid loading Three.js (~40MB) until 3D mode is used
+const MapView3D = dynamic(() => import('./MapView3D'), {
+  loading: () => (
+    <div className="w-full h-full flex items-center justify-center bg-gray-100">
+      <div className="flex flex-col items-center gap-4">
+        <div className="w-12 h-12 border-4 border-gray-200 border-t-indigo-600 rounded-full animate-spin" />
+        <p className="text-gray-600 font-medium">Loading 3D view...</p>
+      </div>
+    </div>
+  ),
+  ssr: false
+})
 
 interface MapViewProps {
   resortSlug: string
@@ -13,12 +26,14 @@ interface MapViewProps {
     name: string
     type: 'trail' | 'lift' | 'boundary' | 'area' | 'road'
     difficulty?: string
-    geometry: any // GeoJSON geometry
+    geometry: GeoJSONGeometry
     status?: string
-    metadata?: any // Metadata including elevation data
+    metadata?: Record<string, unknown> // Metadata including elevation data
   }>
   resortName?: string
   onSpeedUpdate?: (speedData: { current: number | null; top: number; average: number }) => void
+  // Callback for location tracking updates (for run tracking)
+  onLocationUpdate?: (location: { lat: number; lng: number; altitude?: number; speed?: number } | null, isTracking: boolean) => void
   // Optional: Path to qgisthreejs 3D scene export
   scene3DUrl?: string // e.g., '/3d-map/index.html' or '/3d-map/scene.json'
   // Optional: Center coordinates for 3D scene
@@ -27,7 +42,7 @@ interface MapViewProps {
   additionalGeoJSONPaths?: string[] // e.g., ['/3d-map/geojson/tree-line.json', '/3d-map/geojson/runs.json']
 }
 
-export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatures = [], resortName = 'Resort', onSpeedUpdate, scene3DUrl, scene3DCenter, additionalGeoJSONPaths }: MapViewProps) {
+export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatures = [], resortName = 'Resort', onSpeedUpdate, onLocationUpdate, scene3DUrl, scene3DCenter, additionalGeoJSONPaths }: MapViewProps) {
   const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d') // Toggle between 2D and 3D-Three.js
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<any>(null) // Use any to avoid type issues before Leaflet loads
@@ -41,7 +56,6 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   const tileLayersRef = useRef<any[]>([]) // Store tile layers so we can update their bounds
   const layerControlRef = useRef<any>(null) // Store the layer control so we can update it
   const [currentZoom, setCurrentZoom] = useState(13) // Track zoom level
-  const [sidebarOpen, setSidebarOpen] = useState(false) // Sidebar open/closed state - hidden by default, we have our own menu
   const [showLayerMenu, setShowLayerMenu] = useState(false) // Track layer menu visibility
   const [activeBaseLayer, setActiveBaseLayer] = useState<'snowy' | 'standard' | 'terrain' | 'satellite'>('snowy') // Track active base layer
   const [showHillshade, setShowHillshade] = useState(false) // Track hillshade overlay visibility
@@ -57,8 +71,55 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   const [locationError, setLocationError] = useState<string | null>(null) // Store location errors
   const userLocationMarkerRef = useRef<any>(null) // Reference to the user location marker
   const locationWatchIdRef = useRef<number | null>(null) // Reference to the watchPosition ID
+  const hasCenteredOnUserRef = useRef(false) // Track if we've centered on user location already
+  const isMountedRef = useRef(true) // Track if component is mounted
 
-  // Load Leaflet only on client side
+  // Track plugin loading states
+  const esriLeafletLoadedRef = useRef(false)
+  const textpathLoadedRef = useRef(false)
+  
+  // Track component mount state to prevent operations after unmount
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+    }
+  }, [])
+  
+  // Store last reported altitude for location callback
+  const lastAltitudeRef = useRef<number | undefined>(undefined)
+  
+  // Store callback ref to avoid re-running effect on callback change
+  const onLocationUpdateRef = useRef(onLocationUpdate)
+  onLocationUpdateRef.current = onLocationUpdate
+  
+  // Throttle location updates to parent (max once per second)
+  const lastLocationUpdateTimeRef = useRef<number>(0)
+
+  // Report location updates to parent for run tracking (throttled)
+  useEffect(() => {
+    if (!onLocationUpdateRef.current) return
+    
+    // Report tracking state changes immediately
+    if (!isTrackingLocation) {
+      onLocationUpdateRef.current(null, false)
+      return
+    }
+    
+    // Throttle location updates to once per second
+    const now = Date.now()
+    if (userLocation && now - lastLocationUpdateTimeRef.current >= 1000) {
+      lastLocationUpdateTimeRef.current = now
+      onLocationUpdateRef.current({
+        lat: userLocation[0],
+        lng: userLocation[1],
+        altitude: lastAltitudeRef.current,
+        speed: userSpeed || undefined
+      }, true)
+    }
+  }, [userLocation, isTrackingLocation, userSpeed])
+
+  // Load Leaflet only on client side - plugins loaded on-demand
   useEffect(() => {
     if (typeof window === 'undefined') return
     
@@ -66,10 +127,6 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       const L = (await import('leaflet')).default
       // @ts-ignore - CSS import
       await import('leaflet/dist/leaflet.css')
-      // @ts-ignore - leaflet-textpath doesn't have types
-      await import('leaflet-textpath')
-      // @ts-ignore - esri-leaflet for dynamic ESRI services
-      await import('esri-leaflet')
       
       // Fix Leaflet default marker icon issue with Next.js
       delete (L.Icon.Default.prototype as any)._getIconUrl
@@ -87,21 +144,76 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     loadLeaflet()
   }, [])
 
+  // Load leaflet-textpath plugin on-demand
+  const loadTextpathPlugin = async () => {
+    if (textpathLoadedRef.current) return true
+    try {
+      // @ts-ignore - leaflet-textpath doesn't have types
+      await import('leaflet-textpath')
+      textpathLoadedRef.current = true
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // Load esri-leaflet plugin on-demand
+  const loadEsriLeafletPlugin = async () => {
+    if (esriLeafletLoadedRef.current) return true
+    try {
+      // @ts-ignore - esri-leaflet for dynamic ESRI services
+      await import('esri-leaflet')
+      esriLeafletLoadedRef.current = true
+      return true
+    } catch {
+      return false
+    }
+  }
+
   useEffect(() => {
     if (!mapContainer.current || map.current || !leafletLoaded || typeof window === 'undefined') return
     
     const L = (window as any).L
     if (!L) return
 
-    // Calculate center from signs or use default
-    let center: [number, number] = [49.73283, -118.9412] // Ski resort location [lat, lng]
-    let zoom = 16
+    // Calculate center from signs, ski features, or use a reasonable default
+    let center: [number, number]
+    let zoom = 14
 
     if (signs.length > 0) {
+      // Calculate center from signs
       const avgLat = signs.reduce((sum, s) => sum + parseFloat(s.lat.toString()), 0) / signs.length
       const avgLng = signs.reduce((sum, s) => sum + parseFloat(s.lng.toString()), 0) / signs.length
       center = [avgLat, avgLng]
       zoom = 13
+    } else if (skiFeatures.length > 0) {
+      // Calculate center from ski features if no signs
+      // Try to find the boundary first for best centering
+      const boundaryFeature = skiFeatures.find(f => f.type === 'boundary')
+      if (boundaryFeature && boundaryFeature.geometry) {
+        try {
+          const coords = boundaryFeature.geometry.type === 'Polygon' 
+            ? boundaryFeature.geometry.coordinates[0]
+            : boundaryFeature.geometry.type === 'MultiPolygon'
+              ? boundaryFeature.geometry.coordinates[0][0]
+              : []
+          if (coords.length > 0) {
+            const avgLng = coords.reduce((sum: number, c: number[]) => sum + c[0], 0) / coords.length
+            const avgLat = coords.reduce((sum: number, c: number[]) => sum + c[1], 0) / coords.length
+            center = [avgLat, avgLng]
+          } else {
+            center = [0, 0] // Will be overwritten by fitBounds
+          }
+        } catch {
+          center = [0, 0]
+        }
+      } else {
+        center = [0, 0] // Will be overwritten by fitBounds
+      }
+    } else {
+      // No data available - use a neutral center that will be overwritten
+      center = [0, 0]
+      zoom = 2 // World view until we have data
     }
 
     // Initialize map with maxBounds set early to prevent loading tiles outside area
@@ -165,7 +277,6 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
 
     // Hillshade overlay will be created on-demand when toggled
     // This avoids loading tiles until needed
-    console.log('[Hillshade] Ready to create layer on demand')
 
     // Store tile layers for later bounds updates
     tileLayersRef.current = [snowyBase, osm, terrain, satellite]
@@ -299,9 +410,8 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
             if (hillshadeLayerRef.current && map.current.hasLayer(hillshadeLayerRef.current)) {
               // Remove and recreate with new bounds
               map.current.removeLayer(hillshadeLayerRef.current)
-              // Will be recreated on next toggle with correct bounds
-              hillshadeLayerRef.current = null
-              console.log('[Hillshade] Cleared for bounds update, will recreate on next toggle')
+            // Will be recreated on next toggle with correct bounds
+            hillshadeLayerRef.current = null
             }
             
             // Update refs
@@ -367,8 +477,8 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
               
               snowOverlay.addTo(map.current)
               snowOverlayRef.current = snowOverlay
-            } catch (snowError) {
-              console.warn('Could not create snow overlay:', snowError)
+            } catch {
+              // Snow overlay is optional, continue without it
             }
             
             // Note: Layer control will continue to work with the new layers
@@ -421,8 +531,8 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
                 maskPolygon.addTo(map.current)
                 maskOverlayRef.current = maskPolygon
               }
-            } catch (maskError) {
-              console.warn('Could not create mask overlay:', maskError)
+            } catch {
+              // Mask overlay is optional, continue without it
             }
             
             // Fit the map to the expanded bounds initially (only if not already fitted by markers)
@@ -432,8 +542,8 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
                 maxZoom: 17,
               })
             }
-          } catch (e) {
-            console.warn('Could not restrict map to boundary:', e)
+          } catch {
+            // Boundary restriction is optional, continue without it
           }
         }
       }
@@ -517,29 +627,41 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
 
   // Location tracking effect
   useEffect(() => {
-    if (!map.current || !leafletLoaded || typeof window === 'undefined' || !isTrackingLocation) {
-      // Clean up if tracking is disabled
-      if (!isTrackingLocation && locationWatchIdRef.current !== null) {
-        navigator.geolocation.clearWatch(locationWatchIdRef.current)
-        locationWatchIdRef.current = null
-      }
-      if (!isTrackingLocation && userLocationMarkerRef.current) {
-        map.current?.removeLayer(userLocationMarkerRef.current)
-        userLocationMarkerRef.current = null
-        setUserLocation(null)
-        setUserSpeed(null)
-        // Reset speed tracking when stopping
-        setTopSpeed(0)
-        setSpeedHistory([])
-        if (onSpeedUpdate) {
-          onSpeedUpdate({ current: null, top: 0, average: 0 })
-        }
-      }
+    // Early exit conditions - don't start tracking if prerequisites aren't met
+    if (!leafletLoaded || typeof window === 'undefined') {
       return
     }
 
     const L = (window as any).L
     if (!L) return
+
+    // Handle tracking state changes
+    if (!isTrackingLocation) {
+      // Clean up when tracking is disabled
+      if (locationWatchIdRef.current !== null) {
+        navigator.geolocation.clearWatch(locationWatchIdRef.current)
+        locationWatchIdRef.current = null
+      }
+      if (userLocationMarkerRef.current && map.current) {
+        if ((userLocationMarkerRef.current as any).accuracyCircle) {
+          map.current.removeLayer((userLocationMarkerRef.current as any).accuracyCircle)
+        }
+        map.current.removeLayer(userLocationMarkerRef.current)
+        userLocationMarkerRef.current = null
+      }
+      // Reset the centered flag so we center again next time
+      hasCenteredOnUserRef.current = false
+      setUserLocation(null)
+      setUserSpeed(null)
+      setTopSpeed(0)
+      setSpeedHistory([])
+      return
+    }
+
+    // Don't start tracking if map isn't ready
+    if (!map.current) {
+      return
+    }
 
     // Check if geolocation is available
     if (!navigator.geolocation) {
@@ -547,15 +669,33 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       setIsTrackingLocation(false)
       return
     }
+    
+    // Already watching - don't start again
+    if (locationWatchIdRef.current !== null) {
+      return
+    }
+
+    // Capture map reference for use in callbacks
+    const mapInstance = map.current
 
     // Start watching position
     locationWatchIdRef.current = navigator.geolocation.watchPosition(
       (position) => {
-        const { latitude, longitude, accuracy, speed } = position.coords
+        // Guard: Check if component is still mounted and map exists
+        if (!isMountedRef.current || !map.current) {
+          return
+        }
+        
+        const { latitude, longitude, accuracy, speed, altitude } = position.coords
         const location: [number, number] = [latitude, longitude]
         
         setUserLocation(location)
         setLocationError(null)
+        
+        // Store altitude for run tracking
+        if (altitude !== null) {
+          lastAltitudeRef.current = altitude
+        }
 
         // Convert speed from m/s to km/h (speed can be null if not available)
         if (speed !== null && speed !== undefined && !isNaN(speed)) {
@@ -575,60 +715,89 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
           setUserSpeed(null)
         }
 
-        // Create or update the location marker
-        if (!userLocationMarkerRef.current) {
-          // Create a circle marker for user location
-          userLocationMarkerRef.current = L.circleMarker(location, {
-            radius: 10,
-            fillColor: '#3388ff',
-            color: '#ffffff',
-            weight: 3,
-            opacity: 1,
-            fillOpacity: 0.8,
-            className: 'user-location-marker',
-          }).addTo(map.current)
+        // Guard: Double-check map still exists before Leaflet operations
+        const currentMap = map.current
+        if (!currentMap) {
+          return
+        }
+        
+        try {
+          // Create or update the location marker
+          if (!userLocationMarkerRef.current) {
+            // Create a circle marker for user location
+            userLocationMarkerRef.current = L.circleMarker(location, {
+              radius: 10,
+              fillColor: '#3388ff',
+              color: '#ffffff',
+              weight: 3,
+              opacity: 1,
+              fillOpacity: 0.8,
+              className: 'user-location-marker',
+            }).addTo(currentMap)
 
-          // Add accuracy circle
-          const accuracyCircle = L.circle(location, {
-            radius: accuracy,
-            fillColor: '#3388ff',
-            color: '#3388ff',
-            weight: 1,
-            opacity: 0.3,
-            fillOpacity: 0.1,
-            className: 'user-location-accuracy',
-          }).addTo(map.current)
+            // Add accuracy circle
+            const accuracyCircle = L.circle(location, {
+              radius: accuracy,
+              fillColor: '#3388ff',
+              color: '#3388ff',
+              weight: 1,
+              opacity: 0.3,
+              fillOpacity: 0.1,
+              className: 'user-location-accuracy',
+            }).addTo(currentMap)
 
-          // Store accuracy circle reference in the marker (for cleanup)
-          ;(userLocationMarkerRef.current as any).accuracyCircle = accuracyCircle
-
-          // Center map on user location (first time only)
-          map.current.setView(location, Math.max(map.current.getZoom(), 15), {
-            animate: true,
-          })
-        } else {
-          // Update existing marker position
-          userLocationMarkerRef.current.setLatLng(location)
-          // Update accuracy circle
-          if ((userLocationMarkerRef.current as any).accuracyCircle) {
-            ;(userLocationMarkerRef.current as any).accuracyCircle.setLatLng(location)
-            ;(userLocationMarkerRef.current as any).accuracyCircle.setRadius(accuracy)
+            // Store accuracy circle reference in the marker (for cleanup)
+            ;(userLocationMarkerRef.current as any).accuracyCircle = accuracyCircle
           }
+          
+          // Center map on user location (first time only)
+          if (!hasCenteredOnUserRef.current && currentMap) {
+            hasCenteredOnUserRef.current = true
+            currentMap.setView(location, Math.max(currentMap.getZoom(), 15), {
+              animate: true,
+            })
+          }
+          
+          // Update existing marker position
+          if (userLocationMarkerRef.current) {
+            userLocationMarkerRef.current.setLatLng(location)
+            // Update accuracy circle
+            if ((userLocationMarkerRef.current as any).accuracyCircle) {
+              ;(userLocationMarkerRef.current as any).accuracyCircle.setLatLng(location)
+              ;(userLocationMarkerRef.current as any).accuracyCircle.setRadius(accuracy)
+            }
+          }
+        } catch (err) {
+          // Silently handle Leaflet errors (map may have been destroyed)
+          console.warn('Location marker update failed:', err)
         }
       },
       (error) => {
-        console.error('Geolocation error:', error)
+        // Guard: Check if component is still mounted
+        if (!isMountedRef.current) {
+          return
+        }
+        
+        // GeolocationPositionError doesn't serialize well, so extract the message
+        const errorCode = error.code
+        const errorMsg = error.message || 'Unknown error'
+        
+        if (process.env.NODE_ENV === 'development') {
+          console.warn('Geolocation error:', { code: errorCode, message: errorMsg })
+        }
+        
         let errorMessage = 'Unable to get your location'
         
-        switch (error.code) {
-          case error.PERMISSION_DENIED:
+        // GeolocationPositionError codes: 1=PERMISSION_DENIED, 2=POSITION_UNAVAILABLE, 3=TIMEOUT
+        switch (errorCode) {
+          case 1: // PERMISSION_DENIED
             errorMessage = 'Location permission denied. Please enable location access in your browser settings.'
             break
-          case error.POSITION_UNAVAILABLE:
-            errorMessage = 'Location information is unavailable.'
+          case 2: // POSITION_UNAVAILABLE
+            errorMessage = 'Location information is unavailable. Make sure location services are enabled.'
             break
-          case error.TIMEOUT:
-            errorMessage = 'Location request timed out.'
+          case 3: // TIMEOUT
+            errorMessage = 'Location request timed out. Please try again.'
             break
         }
         
@@ -637,27 +806,35 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       },
       {
         enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 0, // Always get fresh position
+        timeout: 15000, // 15 seconds timeout
+        maximumAge: 5000, // Allow positions up to 5 seconds old for faster initial fix
       }
     )
 
     // Cleanup function
     return () => {
+      // Stop watching position
       if (locationWatchIdRef.current !== null) {
         navigator.geolocation.clearWatch(locationWatchIdRef.current)
         locationWatchIdRef.current = null
       }
-      if (userLocationMarkerRef.current) {
-        // Remove accuracy circle if it exists
-        if ((userLocationMarkerRef.current as any).accuracyCircle) {
-          map.current?.removeLayer((userLocationMarkerRef.current as any).accuracyCircle)
+      
+      // Clean up markers - use map.current (fresh ref) not captured mapInstance
+      try {
+        const currentMap = map.current
+        if (userLocationMarkerRef.current && currentMap) {
+          // Remove accuracy circle if it exists
+          if ((userLocationMarkerRef.current as any).accuracyCircle) {
+            currentMap.removeLayer((userLocationMarkerRef.current as any).accuracyCircle)
+          }
+          currentMap.removeLayer(userLocationMarkerRef.current)
         }
-        map.current?.removeLayer(userLocationMarkerRef.current)
-        userLocationMarkerRef.current = null
+      } catch (err) {
+        // Silently handle - map may already be destroyed
       }
+      userLocationMarkerRef.current = null
     }
-  }, [isTrackingLocation, leafletLoaded, map.current])
+  }, [isTrackingLocation, leafletLoaded])
 
   // Update parent component with speed data whenever it changes
   useEffect(() => {
@@ -705,40 +882,39 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     }
   }
 
-  // Create hillshade layer based on type
-  const createHillshadeLayer = (type: 'esri' | 'esri-dark' | 'esri-shaded' | 'esri-terrain3d' | 'stadia', bounds?: any) => {
+  // Create hillshade layer based on type (async to load esri-leaflet on demand)
+  const createHillshadeLayer = async (type: 'esri' | 'esri-dark' | 'esri-shaded' | 'esri-terrain3d' | 'stadia', bounds?: any) => {
     if (typeof window === 'undefined') return null
     const L = (window as any).L
     if (!L) return null
 
-    // Check if esri-leaflet is available for dynamic layers
-    const esriLeaflet = (L as any).esri
-
-    // Special case: ESRI Terrain 3D uses dynamic image service for better resolution
-    if (type === 'esri-terrain3d' && esriLeaflet) {
-      try {
-        // Use ESRI's World Elevation service with hillshade rendering
-        // This is the same data source as the ArcGIS ImageryTileLayer
-        const layer = esriLeaflet.imageMapLayer({
-          url: 'https://elevation.arcgis.com/arcgis/rest/services/WorldElevation/Terrain/ImageServer',
-          attribution: '© <a href="https://www.esri.com">Esri</a> - High Resolution Terrain',
-          opacity: 0.6,
-          // Rendering rule for hillshade visualization
-          renderingRule: {
-            rasterFunction: 'Hillshade',
-            rasterFunctionArguments: {
-              Azimuth: 315,
-              Altitude: 45,
-              ZFactor: 1
-            }
+    // For esri-terrain3d, load esri-leaflet plugin on demand
+    if (type === 'esri-terrain3d') {
+      const loaded = await loadEsriLeafletPlugin()
+      if (loaded) {
+        const esriLeaflet = (L as any).esri
+        if (esriLeaflet) {
+          try {
+            // Use ESRI's World Elevation service with hillshade rendering
+            const layer = esriLeaflet.imageMapLayer({
+              url: 'https://elevation.arcgis.com/arcgis/rest/services/WorldElevation/Terrain/ImageServer',
+              attribution: '© <a href="https://www.esri.com">Esri</a> - High Resolution Terrain',
+              opacity: 0.6,
+              renderingRule: {
+                rasterFunction: 'Hillshade',
+                rasterFunctionArguments: {
+                  Azimuth: 315,
+                  Altitude: 45,
+                  ZFactor: 1
+                }
+              }
+            })
+            return layer
+          } catch {
+            // Fall back to standard ESRI hillshade
+            type = 'esri'
           }
-        })
-        console.log('[Hillshade] Created ESRI Terrain3D dynamic layer')
-        return layer
-      } catch (e) {
-        console.warn('[Hillshade] Failed to create Terrain3D layer, falling back to standard:', e)
-        // Fall back to standard ESRI hillshade
-        type = 'esri'
+        }
       }
     }
 
@@ -793,14 +969,11 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   }
 
   // Toggle hillshade overlay
-  const toggleHillshade = () => {
+  const toggleHillshade = async () => {
     if (!map.current || !leafletLoaded || typeof window === 'undefined') return
-    
-    console.log('[Hillshade] Toggle called, current state:', showHillshade)
 
     if (showHillshade) {
       // Remove hillshade
-      console.log('[Hillshade] Removing layer')
       if (hillshadeLayerRef.current && map.current.hasLayer(hillshadeLayerRef.current)) {
         map.current.removeLayer(hillshadeLayerRef.current)
       }
@@ -808,11 +981,10 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     } else {
       // Create and add hillshade layer
       if (!hillshadeLayerRef.current) {
-        hillshadeLayerRef.current = createHillshadeLayer(hillshadeType)
+        hillshadeLayerRef.current = await createHillshadeLayer(hillshadeType)
       }
       
       if (hillshadeLayerRef.current) {
-        console.log('[Hillshade] Adding layer to map, type:', hillshadeType)
         hillshadeLayerRef.current.addTo(map.current)
         hillshadeLayerRef.current.setZIndex(250)
         
@@ -823,13 +995,12 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
         }
         
         setShowHillshade(true)
-        console.log('[Hillshade] Layer added successfully')
       }
     }
   }
 
   // Switch hillshade type
-  const switchHillshadeType = (type: 'esri' | 'esri-dark' | 'esri-shaded' | 'esri-terrain3d' | 'stadia') => {
+  const switchHillshadeType = async (type: 'esri' | 'esri-dark' | 'esri-shaded' | 'esri-terrain3d' | 'stadia') => {
     if (!map.current || !leafletLoaded) return
     
     const wasShowing = showHillshade
@@ -840,7 +1011,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     }
     
     // Create new layer of the selected type
-    hillshadeLayerRef.current = createHillshadeLayer(type)
+    hillshadeLayerRef.current = await createHillshadeLayer(type)
     setHillshadeType(type)
     
     // Re-add if was showing
@@ -924,8 +1095,8 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
             (layer as any).removeText()
           }
         }
-      } catch (e) {
-        console.warn('Error updating textpath label:', e)
+      } catch {
+        // Textpath update failed, continue
       }
     })
     
@@ -1016,8 +1187,8 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
           }
           return // Successfully set up textpath, skip fallback
         }
-      } catch (e) {
-        console.log('TextPath not available, using fallback labels')
+      } catch {
+        // TextPath not available, use fallback labels
       }
       
       // Fallback: create label at the center of the path
@@ -1211,8 +1382,8 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
               bounds.extend(layer.getBounds())
             }
           })
-        } catch (e) {
-          console.error('Error adding feature to bounds:', e)
+        } catch {
+          // Skip features that fail to add to bounds
         }
       })
       
@@ -1223,20 +1394,19 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     }
   }
 
-  const addSkiFeatures = () => {
+  const addSkiFeatures = async () => {
     if (!map.current || skiFeatures.length === 0 || typeof window === 'undefined') return
     const L = (window as any).L
     if (!L) return
-
-    console.log(`[MapView] Adding ${skiFeatures.length} ski features to map`)
-    console.log(`[MapView] Feature types:`, skiFeatures.map(f => f.type))
+    
+    // Load textpath plugin for trail labels (lazy load)
+    await loadTextpathPlugin()
     
     skiFeatures.forEach((feature, index) => {
       try {
         // Validate geometry
         if (!feature.geometry || !feature.geometry.type || !feature.geometry.coordinates) {
-          console.warn(`[MapView] Skipping feature ${feature.name || index}: invalid geometry`, feature.geometry)
-          return
+          return // Skip invalid geometry
         }
         
         // Create GeoJSON feature from geometry
@@ -1351,16 +1521,6 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
         // Create GeoJSON layer with explicit style
         const props = geoJsonFeature.properties || {}
         const style = getStyle(props)
-        
-        // Debug logging for trails (only first few to avoid spam)
-        if (props.type === 'trail' && Math.random() < 0.1) {
-          console.log('Trail feature sample:', {
-            name: props.name,
-            type: props.type,
-            difficulty: props.difficulty,
-            color: style.color,
-          })
-        }
         
         const geoJsonLayer = L.geoJSON(geoJsonFeature, {
           style: () => style, // Use explicit style instead of function
@@ -1514,32 +1674,10 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
 
         geoJsonLayer.addTo(map.current!)
         layersRef.current.push(geoJsonLayer)
-        
-        // Debug: log first few features being added
-        if (layersRef.current.length <= 10) {
-          try {
-            const bounds = geoJsonLayer.getBounds()
-            console.log(`[MapView] Added feature: ${feature.name} (${feature.type})`, {
-              geometryType: feature.geometry?.type,
-              hasCoordinates: !!feature.geometry?.coordinates,
-              bounds: bounds ? `${bounds.getSouthWest().lat.toFixed(4)}, ${bounds.getSouthWest().lng.toFixed(4)} to ${bounds.getNorthEast().lat.toFixed(4)}, ${bounds.getNorthEast().lng.toFixed(4)}` : 'no bounds',
-              layerCount: layersRef.current.length
-            })
-          } catch (e) {
-            console.log(`[MapView] Added feature: ${feature.name} (${feature.type})`, {
-              geometryType: feature.geometry?.type,
-              hasCoordinates: !!feature.geometry?.coordinates,
-              layerCount: layersRef.current.length,
-              error: e
-            })
-          }
-        }
-      } catch (e) {
-        console.error('Error adding ski feature:', feature.name, e)
+      } catch {
+        // Skip features that fail to add
       }
     })
-    
-    console.log(`[MapView] Total layers added: ${layersRef.current.length}`)
   }
 
   // If 3D mode is enabled and scene URL is provided, render Three.js 3D view
@@ -1847,81 +1985,6 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
         </div>
       )}
       
-      {/* Floating Sidebar Panel from Left */}
-      <div
-        className={`absolute left-0 top-0 h-full bg-white shadow-2xl transition-transform duration-300 ease-in-out z-[1000] ${
-          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
-        }`}
-        style={{ width: '320px' }}
-      >
-        <div className="p-6 h-full flex flex-col">
-          {/* Header */}
-          <div className="mb-6">
-            <button
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="absolute -right-10 top-4 bg-white rounded-r-lg px-2 py-4 shadow-lg hover:bg-gray-50 transition-colors"
-              aria-label={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
-            >
-              {sidebarOpen ? (
-                <svg className="w-5 h-5 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                </svg>
-              ) : (
-                <svg className="w-5 h-5 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                </svg>
-              )}
-            </button>
-            
-            <h1 className="text-2xl font-bold text-gray-900 mb-2">{resortName} Map</h1>
-            <p className="text-sm text-gray-600">
-              Find all the signs on the map. Green markers indicate signs you've found.
-            </p>
-            {skiFeatures.length > 0 && (
-              <p className="text-xs text-gray-500 mt-2">
-                Trails, lifts, and resort boundaries are shown on the map.
-              </p>
-            )}
-          </div>
-
-          {/* Progress Info */}
-          <div className="mb-6 p-4 bg-gray-50 rounded-lg">
-            <div className="text-sm font-semibold text-gray-700 mb-2">
-              Progress: {discoveredSignIds.size} / {signs.length} signs found
-            </div>
-            <div className="w-full bg-gray-200 rounded-full h-2">
-              <div
-                className="bg-green-500 h-2 rounded-full transition-all duration-300"
-                style={{ width: `${signs.length > 0 ? (discoveredSignIds.size / signs.length) * 100 : 0}%` }}
-              ></div>
-            </div>
-          </div>
-
-          {/* Buttons */}
-          <div className="space-y-3 flex-1">
-            <a
-              href={`/${resortSlug}/game`}
-              className="block w-full px-4 py-3 bg-indigo-600 text-white text-center rounded-lg hover:bg-indigo-700 transition-colors font-medium"
-            >
-              View Signs List
-            </a>
-            <a
-              href={`/${resortSlug}/game`}
-              className="block w-full px-4 py-3 bg-gray-100 text-gray-700 text-center rounded-lg hover:bg-gray-200 transition-colors font-medium"
-            >
-              Back to Game
-            </a>
-          </div>
-
-          {/* Footer */}
-          <div className="mt-auto pt-4 border-t border-gray-200">
-            <p className="text-xs text-gray-500 text-center">
-              Use the map controls to zoom and pan
-            </p>
-          </div>
-        </div>
-      </div>
-
       {/* Legend Bubble at Bottom of Map - Hidden, we have our own UI */}
       <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-white rounded-lg shadow-xl p-4 z-[999] max-w-md hidden">
         <div className="flex flex-col gap-3">

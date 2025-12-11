@@ -1,6 +1,7 @@
 /**
  * Utility to load GeoJSON files from the public folder
  * Used for loading QGIS exports (tree lines, runs, etc.)
+ * Includes caching and request deduplication
  */
 
 export interface GeoJSONFeature {
@@ -9,7 +10,7 @@ export interface GeoJSONFeature {
     type: 'LineString' | 'Polygon' | 'MultiLineString' | 'MultiPolygon' | 'Point'
     coordinates: number[] | number[][] | number[][][]
   }
-  properties?: Record<string, any>
+  properties?: Record<string, unknown>
 }
 
 export interface GeoJSONFeatureCollection {
@@ -17,40 +18,71 @@ export interface GeoJSONFeatureCollection {
   features: GeoJSONFeature[]
 }
 
+// In-memory cache for loaded GeoJSON files
+const geoJSONCache = new Map<string, GeoJSONFeatureCollection>()
+
+// Pending request deduplication
+const pendingRequests = new Map<string, Promise<GeoJSONFeatureCollection | null>>()
+
 /**
- * Load a GeoJSON file from the public folder
+ * Load a GeoJSON file from the public folder with caching
  * @param path Path to GeoJSON file (e.g., '/3d-map/geojson/tree-line.json')
  * @returns Promise with GeoJSON feature collection
  */
 export async function loadGeoJSONFile(path: string): Promise<GeoJSONFeatureCollection | null> {
-  try {
-    const response = await fetch(path)
-    if (!response.ok) {
-      console.warn(`Failed to load GeoJSON from ${path}: ${response.statusText}`)
-      return null
-    }
-    const data = await response.json()
-    
-    // Handle both FeatureCollection and single Feature
-    if (data.type === 'FeatureCollection') {
-      return data as GeoJSONFeatureCollection
-    } else if (data.type === 'Feature') {
-      return {
-        type: 'FeatureCollection',
-        features: [data as GeoJSONFeature],
-      }
-    } else {
-      console.warn(`Invalid GeoJSON format in ${path}`)
-      return null
-    }
-  } catch (error) {
-    console.error(`Error loading GeoJSON from ${path}:`, error)
-    return null
+  // Check cache first
+  const cached = geoJSONCache.get(path)
+  if (cached) {
+    return cached
   }
+
+  // Check if there's already a pending request for this path
+  const pending = pendingRequests.get(path)
+  if (pending) {
+    return pending
+  }
+
+  // Create new request and store it for deduplication
+  const requestPromise = (async (): Promise<GeoJSONFeatureCollection | null> => {
+    try {
+      const response = await fetch(path)
+      if (!response.ok) {
+        return null
+      }
+      const data = await response.json()
+      
+      let result: GeoJSONFeatureCollection | null = null
+      
+      // Handle both FeatureCollection and single Feature
+      if (data.type === 'FeatureCollection') {
+        result = data as GeoJSONFeatureCollection
+      } else if (data.type === 'Feature') {
+        result = {
+          type: 'FeatureCollection',
+          features: [data as GeoJSONFeature],
+        }
+      }
+      
+      // Cache successful results
+      if (result) {
+        geoJSONCache.set(path, result)
+      }
+      
+      return result
+    } catch {
+      return null
+    } finally {
+      // Clean up pending request
+      pendingRequests.delete(path)
+    }
+  })()
+
+  pendingRequests.set(path, requestPromise)
+  return requestPromise
 }
 
 /**
- * Load multiple GeoJSON files
+ * Load multiple GeoJSON files in parallel
  * @param paths Array of paths to GeoJSON files
  * @returns Promise with array of feature collections
  */
@@ -75,4 +107,9 @@ export function mergeGeoJSONCollections(
   }
 }
 
-
+/**
+ * Clear the GeoJSON cache (useful for development)
+ */
+export function clearGeoJSONCache(): void {
+  geoJSONCache.clear()
+}

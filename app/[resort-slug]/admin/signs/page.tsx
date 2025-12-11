@@ -1,5 +1,5 @@
 import { createClient } from '@/lib/supabase/server'
-import { redirect } from 'next/navigation'
+import { redirect, notFound } from 'next/navigation'
 import Link from 'next/link'
 import { Sign } from '@/lib/utils/types'
 
@@ -18,18 +18,23 @@ export default async function AdminSignsPage({
     redirect('/login')
   }
 
-  // Get resort
-  const { data: resort } = await supabase
+  // Get resort - must exist to proceed
+  const { data: resort, error: resortError } = await supabase
     .from('resorts')
     .select('*')
     .eq('slug', resolvedParams['resort-slug'])
     .single()
 
-  // Get signs
+  // Guard clause: Resort must exist before we query signs
+  if (resortError || !resort) {
+    notFound()
+  }
+
+  // Get signs - now safe to use resort.id
   const { data: signs } = await supabase
     .from('signs')
     .select('*')
-    .eq('resort_id', resort?.id)
+    .eq('resort_id', resort.id)
     .order('order_index', { ascending: true })
 
   return (

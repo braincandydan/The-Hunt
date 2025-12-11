@@ -1,4 +1,48 @@
 // Database types
+
+// GeoJSON types for geometry
+export type GeoJSONPoint = {
+  type: 'Point'
+  coordinates: [number, number] | [number, number, number]
+}
+
+export type GeoJSONLineString = {
+  type: 'LineString'
+  coordinates: Array<[number, number] | [number, number, number]>
+}
+
+export type GeoJSONPolygon = {
+  type: 'Polygon'
+  coordinates: Array<Array<[number, number] | [number, number, number]>>
+}
+
+export type GeoJSONMultiLineString = {
+  type: 'MultiLineString'
+  coordinates: Array<Array<[number, number] | [number, number, number]>>
+}
+
+export type GeoJSONMultiPolygon = {
+  type: 'MultiPolygon'
+  coordinates: Array<Array<Array<[number, number] | [number, number, number]>>>
+}
+
+export type GeoJSONGeometry = 
+  | GeoJSONPoint 
+  | GeoJSONLineString 
+  | GeoJSONPolygon 
+  | GeoJSONMultiLineString 
+  | GeoJSONMultiPolygon
+
+// Metadata types for ski features
+export interface SkiFeatureMetadata {
+  original_properties?: Record<string, unknown>
+  elevation_max?: number
+  elevation_min?: number
+  length_meters?: number
+  source?: string
+  [key: string]: unknown
+}
+
 export interface Resort {
   id: string
   name: string
@@ -70,10 +114,61 @@ export interface SkiFeature {
   name: string
   type: 'trail' | 'lift' | 'boundary' | 'area' | 'road'
   difficulty?: 'green' | 'blue' | 'black' | 'double-black' | 'terrain-park' | 'other' | null
-  geometry: any // GeoJSON geometry
-  metadata?: any | null
+  geometry: GeoJSONGeometry
+  metadata?: SkiFeatureMetadata | null
   status?: 'open' | 'closed' | 'groomed' | 'ungroomed' | null
   active: boolean
   order_index?: number | null
   created_at: string
+}
+
+// Run tracking types
+export interface SkiSession {
+  id: string
+  user_id: string
+  resort_id: string
+  session_date: string
+  started_at: string
+  ended_at?: string | null
+  total_runs: number
+  total_vertical_meters: number
+  total_distance_meters: number
+  top_speed_kmh: number
+  avg_speed_kmh: number
+  is_active: boolean
+}
+
+export interface RunCompletion {
+  id: string
+  session_id: string
+  user_id: string
+  ski_feature_id: string
+  started_at: string
+  completed_at: string
+  duration_seconds?: number | null
+  top_speed_kmh?: number | null
+  avg_speed_kmh?: number | null
+  gps_track?: GeoJSONLineString | null
+  detection_method: 'gps_proximity' | 'manual' | 'qr_scan'
+  // Joined data
+  ski_feature?: SkiFeature
+}
+
+export interface LocationHistory {
+  id: string
+  session_id: string
+  user_id: string
+  latitude: number
+  longitude: number
+  altitude_meters?: number | null
+  speed_kmh?: number | null
+  accuracy_meters?: number | null
+  recorded_at: string
+}
+
+// Session with aggregated data for display
+export interface SessionSummary extends SkiSession {
+  resort?: Resort
+  run_completions?: RunCompletion[]
+  unique_runs_count?: number
 }

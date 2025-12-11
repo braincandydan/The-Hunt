@@ -73,7 +73,7 @@ export async function getAdminResorts(): Promise<string[]> {
   // Check if user is super admin - return empty array (they can manage all)
   const { data: metadata } = await supabase
     .from('user_metadata')
-    .select('is_admin')
+    .select('is_admin, resort_id')
     .eq('id', user.id)
     .single()
 

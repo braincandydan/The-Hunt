@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 
@@ -14,15 +14,21 @@ export default function ResortLoginPage({
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [signupSuccess, setSignupSuccess] = useState(false)
   const router = useRouter()
-  const supabase = createClient()
+  // Create Supabase client once using useMemo
+  const supabase = useMemo(() => createClient(), [])
 
   useEffect(() => {
     params.then(setResolvedParams)
   }, [params])
 
   if (!resolvedParams) {
-    return <div>Loading...</div>
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="animate-pulse text-gray-500">Loading...</div>
+      </div>
+    )
   }
 
   const resortSlug = resolvedParams['resort-slug']
@@ -42,8 +48,9 @@ export default function ResortLoginPage({
 
       router.push(`/${resortSlug}/game/map`)
       router.refresh()
-    } catch (err: any) {
-      setError(err.message || 'An error occurred')
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'An error occurred'
+      setError(message)
     } finally {
       setLoading(false)
     }
@@ -58,12 +65,15 @@ export default function ResortLoginPage({
       const state = JSON.stringify({ resortSlug })
       const redirectTo = `${window.location.origin}/auth/callback?state=${encodeURIComponent(state)}`
 
-      const { data, error } = await supabase.auth.signUp({
+      const { error } = await supabase.auth.signUp({
         email,
         password,
         options: {
           emailRedirectTo: redirectTo,
           data: {
+            // Store resort slug in user metadata for use after email confirmation
+            // The association with user_resorts will happen via autoJoinResortIfNeeded
+            // when the user first accesses the game after confirming their email
             resort_slug: resortSlug,
           },
         },
@@ -71,41 +81,13 @@ export default function ResortLoginPage({
 
       if (error) throw error
 
-      // Associate user with resort
-      if (data.user) {
-        // Get resort ID
-        const { data: resort } = await supabase
-          .from('resorts')
-          .select('id')
-          .eq('slug', resortSlug)
-          .single()
-
-        if (resort) {
-          // Add user to user_resorts table (tracks which resorts user has joined)
-          await supabase
-            .from('user_resorts')
-            .insert({
-              user_id: data.user.id,
-              resort_id: resort.id,
-            })
-            // Use upsert to avoid errors if already exists
-            .select()
-            .single()
-
-          // Also set as primary resort in user_metadata (for backward compatibility)
-          // This can be used as "home resort" or default resort
-          await supabase
-            .from('user_metadata')
-            .upsert({
-              id: data.user.id,
-              resort_id: resort.id, // Primary/home resort
-            })
-        }
-      }
-
-      alert('Check your email for the confirmation link!')
-    } catch (err: any) {
-      setError(err.message || 'An error occurred')
+      // Don't try to associate user with resort here - the user hasn't confirmed 
+      // their email yet. The association will happen automatically when they
+      // first access the game (via autoJoinResortIfNeeded in the map page).
+      setSignupSuccess(true)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'An error occurred'
+      setError(message)
     } finally {
       setLoading(false)
     }
@@ -124,6 +106,12 @@ export default function ResortLoginPage({
           {error && (
             <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded">
               {error}
+            </div>
+          )}
+          {signupSuccess && (
+            <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded">
+              <p className="font-medium">Check your email!</p>
+              <p className="text-sm mt-1">We sent you a confirmation link. Click it to complete your registration.</p>
             </div>
           )}
           <div className="space-y-4">
