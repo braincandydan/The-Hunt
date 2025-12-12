@@ -245,7 +245,7 @@ function SessionCard({
                   className="flex items-center gap-3 py-2 px-3 bg-white/5 rounded-lg"
                 >
                   <span className="text-gray-500 text-sm w-6">{i + 1}.</span>
-                  <DifficultyBadge difficulty={feature?.difficulty} />
+                  <DifficultyBadge difficulty={feature?.difficulty ?? undefined} />
                   <span className="flex-1 font-medium text-white truncate">
                     {feature?.name || 'Unknown Run'}
                   </span>
