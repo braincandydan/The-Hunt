@@ -65,7 +65,7 @@ export default async function SessionHistoryPage({
   // Fetch ski features for the map
   const { data: skiFeatures } = await supabase
     .from('ski_features')
-    .select('id, name, type, difficulty, geometry')
+    .select('id, name, type, difficulty, geometry, resort_id, active, created_at')
     .eq('resort_id', resort.id)
     .eq('active', true)
 
