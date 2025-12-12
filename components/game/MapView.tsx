@@ -216,18 +216,9 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       zoom = 2 // World view until we have data
     }
 
-    // Initialize map with maxBounds set early to prevent loading tiles outside area
-    // We'll refine this later when we have the boundary, but set a reasonable default
-    const defaultBounds = L.latLngBounds(
-      [center[0] - 0.5, center[1] - 0.5],
-      [center[0] + 0.5, center[1] + 0.5]
-    )
-    
     map.current = L.map(mapContainer.current, {
       center,
       zoom,
-      maxBounds: defaultBounds, // Prevent loading tiles outside initially
-      maxBoundsViscosity: 1.0, // Strictly enforce bounds (1.0 = no panning outside)
       zoomSnap: 0, // No snapping - allows completely smooth continuous zoom
       zoomDelta: 1.0, // Standard zoom steps for natural feel
       wheelPxPerZoomLevel: 30, // Faster zoom response (lower = faster)
@@ -249,7 +240,6 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     const snowyBase = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
       attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, © <a href="https://carto.com/attributions">CARTO</a>',
       maxZoom: 19,
-      bounds: defaultBounds,
     })
     applySnowyStyling(snowyBase)
 
@@ -257,7 +247,6 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       maxZoom: 19,
-      bounds: defaultBounds,
     })
     applySnowyStyling(osm)
 
@@ -265,14 +254,12 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     const terrain = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
       attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, © <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)',
       maxZoom: 17,
-      bounds: defaultBounds,
     })
 
     // ESRI World Imagery - high-resolution satellite imagery
     const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
       attribution: '© <a href="https://www.esri.com">Esri</a>, Maxar, Earthstar Geographics',
       maxZoom: 19,
-      bounds: defaultBounds,
     })
 
     // Hillshade overlay will be created on-demand when toggled
@@ -314,245 +301,10 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     addMarkers()
     addSkiFeatures()
     
-    // Restrict map view to ski area boundary (if available) - run after features are loaded
-    setTimeout(() => {
-      if (map.current && skiFeatures.length > 0) {
-        const boundaryFeature = skiFeatures.find(f => f.type === 'boundary')
-        if (boundaryFeature) {
-          try {
-            // Calculate bounds from boundary geometry
-            const boundaryGeoJson = L.geoJSON(boundaryFeature.geometry)
-            const boundaryBounds = boundaryGeoJson.getBounds()
-            
-            // Expand bounds by 20% on all sides to show area outside boundary
-            const sw = boundaryBounds.getSouthWest()
-            const ne = boundaryBounds.getNorthEast()
-            const latDiff = ne.lat - sw.lat
-            const lngDiff = ne.lng - sw.lng
-            
-            const expandedSW = L.latLng(
-              sw.lat - (latDiff * 0.2),
-              sw.lng - (lngDiff * 0.2)
-            )
-            const expandedNE = L.latLng(
-              ne.lat + (latDiff * 0.2),
-              ne.lng + (lngDiff * 0.2)
-            )
-            
-            const expandedBounds = L.latLngBounds(expandedSW, expandedNE)
-            
-            // Set max bounds to restrict panning
-            map.current.setMaxBounds(expandedBounds)
-            
-            // Update tile layer bounds to prevent loading tiles outside the boundary area
-            // This is the key to actually preventing tile loading, not just panning
-            // We need to recreate the tile layers with the new bounds option
-            const cartoUrl = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
-            const osmUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
-            const terrainUrl = 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png'
-            
-            // Get which layer is currently active based on activeBaseLayer state
-            let activeLayerIndex = 0
-            if (activeBaseLayer === 'snowy') {
-              activeLayerIndex = 0
-            } else if (activeBaseLayer === 'standard') {
-              activeLayerIndex = 1
-            } else {
-              activeLayerIndex = 2
-            }
-            
-            // Fallback: check which layer is actually on the map
-            tileLayersRef.current.forEach((layer, index) => {
-              if (map.current && map.current.hasLayer(layer)) {
-                activeLayerIndex = index
-              }
-            })
-            
-            // Remove all tile layers from map
-            tileLayersRef.current.forEach((layer) => {
-              if (map.current && map.current.hasLayer(layer)) {
-                map.current.removeLayer(layer)
-              }
-            })
-            
-            // Recreate CartoDB layer with bounds
-            const newCartoBase = L.tileLayer(cartoUrl, {
-              attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, © <a href="https://carto.com/attributions">CARTO</a>',
-              maxZoom: 19,
-              bounds: expandedBounds, // Restrict tiles to boundary area
-            })
-            applySnowyStyling(newCartoBase)
-            
-            // Recreate OSM layer with bounds
-            const newOSM = L.tileLayer(osmUrl, {
-              attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-              maxZoom: 19,
-              bounds: expandedBounds, // Restrict tiles to boundary area
-            })
-            applySnowyStyling(newOSM)
-            
-            // Recreate Terrain layer with bounds (no snowy styling)
-            const newTerrain = L.tileLayer(terrainUrl, {
-              attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, © <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)',
-              maxZoom: 17,
-              bounds: expandedBounds, // Restrict tiles to boundary area
-            })
-            
-            // Recreate Satellite layer with bounds
-            const satelliteUrl = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
-            const newSatellite = L.tileLayer(satelliteUrl, {
-              attribution: '© <a href="https://www.esri.com">Esri</a>, Maxar, Earthstar Geographics',
-              maxZoom: 19,
-              bounds: expandedBounds, // Restrict tiles to boundary area
-            })
-            
-            // Handle hillshade layer bounds update if it exists
-            if (hillshadeLayerRef.current && map.current.hasLayer(hillshadeLayerRef.current)) {
-              // Remove and recreate with new bounds
-              map.current.removeLayer(hillshadeLayerRef.current)
-            // Will be recreated on next toggle with correct bounds
-            hillshadeLayerRef.current = null
-            }
-            
-            // Update refs
-            tileLayersRef.current = [newCartoBase, newOSM, newTerrain, newSatellite]
-            
-            // Update layer control reference (we use custom UI, so just update the ref)
-            const updatedBaseMaps = {
-              'Snowy Map': newCartoBase,
-              'Standard Map': newOSM,
-              'Terrain Map': newTerrain,
-              'Satellite': newSatellite,
-            }
-            const updatedLayerControl = L.control.layers(updatedBaseMaps, undefined, { position: 'topright' })
-            layerControlRef.current = updatedLayerControl
-            
-            // Add the appropriate layer based on what was active before
-            tileLayersRef.current[activeLayerIndex].addTo(map.current)
-            
-            // Update active base layer state to match
-            if (activeLayerIndex === 0) {
-              setActiveBaseLayer('snowy')
-            } else if (activeLayerIndex === 1) {
-              setActiveBaseLayer('standard')
-            } else if (activeLayerIndex === 2) {
-              setActiveBaseLayer('terrain')
-            } else {
-              setActiveBaseLayer('satellite')
-            }
-            
-            // Add snow texture overlay for game-like feel
-            try {
-              // Remove existing snow overlay if any
-              if (snowOverlayRef.current && map.current.hasLayer(snowOverlayRef.current)) {
-                map.current.removeLayer(snowOverlayRef.current)
-              }
-              
-              // Create snow texture pattern (SVG)
-              const snowPattern = `
-                <svg width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">
-                  <defs>
-                    <pattern id="snowPattern" x="0" y="0" width="200" height="200" patternUnits="userSpaceOnUse">
-                      <circle cx="30" cy="40" r="1.5" fill="white" opacity="0.25"/>
-                      <circle cx="80" cy="20" r="1" fill="white" opacity="0.2"/>
-                      <circle cx="120" cy="60" r="1.2" fill="white" opacity="0.22"/>
-                      <circle cx="50" cy="100" r="1" fill="white" opacity="0.2"/>
-                      <circle cx="150" cy="80" r="1.3" fill="white" opacity="0.23"/>
-                      <circle cx="180" cy="140" r="1" fill="white" opacity="0.2"/>
-                      <circle cx="100" cy="160" r="1.1" fill="white" opacity="0.21"/>
-                      <circle cx="20" cy="180" r="1.2" fill="white" opacity="0.22"/>
-                    </pattern>
-                  </defs>
-                  <rect width="100%" height="100%" fill="url(#snowPattern)"/>
-                </svg>
-              `
-              
-              const dataUrl = 'data:image/svg+xml;base64,' + btoa(snowPattern)
-              
-              const snowOverlay = L.imageOverlay(dataUrl, expandedBounds, {
-                opacity: 0.12,
-                interactive: false,
-                zIndex: 100, // Above tiles, below markers
-              })
-              
-              snowOverlay.addTo(map.current)
-              snowOverlayRef.current = snowOverlay
-            } catch {
-              // Snow overlay is optional, continue without it
-            }
-            
-            // Note: Layer control will continue to work with the new layers
-            // The layers themselves are replaced but the control references will update automatically
-            
-            // REMOVED: Zoom lock - allow free zooming in/out
-            // Users can now zoom freely without restrictions
-            
-            // Create a grey mask overlay for areas outside the boundary
-            // We'll create a polygon covering the expanded bounds with the boundary as a hole
-            try {
-              // Remove existing mask if any
-              if (maskOverlayRef.current && map.current.hasLayer(maskOverlayRef.current)) {
-                map.current.removeLayer(maskOverlayRef.current)
-              }
-              
-              // Get boundary coordinates (convert from GeoJSON format [lng, lat] to Leaflet [lat, lng])
-              let boundaryCoords: [number, number][] = []
-              if (boundaryFeature.geometry.type === 'Polygon') {
-                // Reverse coordinates: GeoJSON is [lng, lat], Leaflet needs [lat, lng]
-                boundaryCoords = boundaryFeature.geometry.coordinates[0].map((coord: number[]): [number, number] => [coord[1], coord[0]])
-              } else if (boundaryFeature.geometry.type === 'MultiPolygon') {
-                // Take the first polygon's outer ring
-                boundaryCoords = boundaryFeature.geometry.coordinates[0][0].map((coord: number[]): [number, number] => [coord[1], coord[0]])
-              }
-              
-              if (boundaryCoords.length > 0) {
-                // Create outer rectangle covering the ENTIRE WORLD
-                // This ensures ALL areas outside the boundary are the same dark grey color, no matter how far zoomed out
-                // Using world bounds: -90 to 90 lat, -180 to 180 lng
-                const worldRect: [number, number][] = [
-                  [-90, -180],  // Southwest corner of the world
-                  [90, -180],   // Northwest corner
-                  [90, 180],    // Northeast corner
-                  [-90, 180],   // Southeast corner
-                  [-90, -180],  // Close the polygon
-                ]
-                
-                // Create polygon with hole: outer ring covers entire world, inner ring is the boundary
-                // Leaflet uses nested arrays: [[outer ring], [inner ring (hole)]]
-                // This ensures ANY area outside the boundary, no matter how far zoomed out, is the same dark grey
-                const maskPolygon = L.polygon([worldRect, boundaryCoords] as [number, number][][], {
-                  fillColor: '#333333', // Consistent dark grey color for ALL areas outside boundary
-                  fillOpacity: 0.6,
-                  color: '#333333',
-                  weight: 0,
-                  interactive: false, // Don't block map interactions
-                })
-                
-                maskPolygon.addTo(map.current)
-                maskOverlayRef.current = maskPolygon
-              }
-            } catch {
-              // Mask overlay is optional, continue without it
-            }
-            
-            // Fit the map to the expanded bounds initially (only if not already fitted by markers)
-            if (signs.length === 0) {
-              map.current.fitBounds(expandedBounds, {
-                padding: [20, 20],
-                maxZoom: 17,
-              })
-            }
-          } catch {
-            // Boundary restriction is optional, continue without it
-          }
-        }
-      }
-      
-      // Update label visibility after features are loaded
-      if (map.current) {
-        updateLabelVisibility(map.current.getZoom())
-      }
-    }, 150)
+    // Update label visibility after features are loaded
+    if (map.current) {
+      updateLabelVisibility(map.current.getZoom())
+    }
 
     return () => {
       // Cleanup location tracking
@@ -576,8 +328,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
           markersRef.current = []
           layersRef.current.forEach((layer) => map.current?.removeLayer(layer))
           layersRef.current = []
-        }
-      }
+          
           // Remove textpath labels
           textpathLayersRef.current.forEach(({ layer }) => {
             try {
@@ -606,7 +357,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
             map.current.removeLayer(hillshadeLayerRef.current)
           }
           hillshadeLayerRef.current = null
-      if (map.current) {
+        }
         map.current.remove()
         map.current = null
       }
@@ -722,9 +473,9 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
         }
         
         try {
-          // Create or update the location marker
+          // Always ensure marker exists and is on the map when tracking is enabled
           if (!userLocationMarkerRef.current) {
-            // Create a circle marker for user location
+            // Create a circle marker for user location with high z-index to ensure visibility
             userLocationMarkerRef.current = L.circleMarker(location, {
               radius: 10,
               fillColor: '#3388ff',
@@ -733,7 +484,10 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
               opacity: 1,
               fillOpacity: 0.8,
               className: 'user-location-marker',
-            }).addTo(currentMap)
+            })
+            userLocationMarkerRef.current.addTo(currentMap)
+            // Bring to front to ensure it's always visible
+            userLocationMarkerRef.current.bringToFront()
 
             // Add accuracy circle
             const accuracyCircle = L.circle(location, {
@@ -744,27 +498,45 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
               opacity: 0.3,
               fillOpacity: 0.1,
               className: 'user-location-accuracy',
-            }).addTo(currentMap)
+            })
+            accuracyCircle.addTo(currentMap)
 
             // Store accuracy circle reference in the marker (for cleanup)
             ;(userLocationMarkerRef.current as any).accuracyCircle = accuracyCircle
+          } else {
+            // Ensure marker is still on the map (in case it was removed)
+            if (!currentMap.hasLayer(userLocationMarkerRef.current)) {
+              userLocationMarkerRef.current.addTo(currentMap)
+              userLocationMarkerRef.current.bringToFront()
+            }
+            // Ensure accuracy circle is on the map
+            const accuracyCircle = (userLocationMarkerRef.current as any).accuracyCircle
+            if (accuracyCircle && !currentMap.hasLayer(accuracyCircle)) {
+              accuracyCircle.addTo(currentMap)
+            }
           }
           
           // Center map on user location (first time only)
+          // Use panTo instead of setView to avoid zoom transitions that cause _leaflet_pos errors
           if (!hasCenteredOnUserRef.current && currentMap) {
             hasCenteredOnUserRef.current = true
-            currentMap.setView(location, Math.max(currentMap.getZoom(), 15), {
-              animate: true,
-            })
+            try {
+              // Just pan to location without changing zoom - avoids zoom transition errors
+              currentMap.panTo(location, { animate: false })
+            } catch (err) {
+              // Silently ignore - map may not be ready
+            }
           }
           
-          // Update existing marker position
+          // Always update marker position to keep it visible
           if (userLocationMarkerRef.current) {
             userLocationMarkerRef.current.setLatLng(location)
+            userLocationMarkerRef.current.bringToFront() // Keep it on top
             // Update accuracy circle
             if ((userLocationMarkerRef.current as any).accuracyCircle) {
-              ;(userLocationMarkerRef.current as any).accuracyCircle.setLatLng(location)
-              ;(userLocationMarkerRef.current as any).accuracyCircle.setRadius(accuracy)
+              const accCircle = (userLocationMarkerRef.current as any).accuracyCircle
+              accCircle.setLatLng(location)
+              accCircle.setRadius(accuracy)
             }
           }
         } catch (err) {
@@ -1387,10 +1159,23 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
         }
       })
       
-      map.current.fitBounds(bounds, {
-        padding: [50, 50],
-        maxZoom: 15,
-      })
+      // Fit map to show all markers and features
+      // Disable animation to prevent _leaflet_pos errors during zoom transitions
+      if (map.current && bounds.isValid()) {
+        try {
+          map.current.fitBounds(bounds, {
+            padding: [50, 50],
+            maxZoom: 15,
+            animate: false, // Disable animation to prevent _leaflet_pos errors
+          })
+        } catch (error) {
+          // Fallback: use setView without animation
+          if (map.current && bounds.isValid()) {
+            const center = bounds.getCenter()
+            map.current.setView(center, Math.min(map.current.getZoom(), 15), { animate: false })
+          }
+        }
+      }
     }
   }
 
