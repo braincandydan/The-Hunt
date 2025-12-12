@@ -38,7 +38,7 @@ export function useWakeLock(): UseWakeLockReturn {
 
   // Check support on mount
   useEffect(() => {
-    const isSupported = typeof navigator !== 'undefined' && 'wakeLock' in navigator
+    const isSupported = typeof navigator !== 'undefined' && 'wakeLock' in navigator && typeof (navigator as any).wakeLock?.request === 'function'
     setState(prev => ({ ...prev, isSupported }))
   }, [])
 
@@ -47,7 +47,7 @@ export function useWakeLock(): UseWakeLockReturn {
     const handleVisibilityChange = async () => {
       if (document.visibilityState === 'visible' && requestedRef.current && !wakeLockRef.current) {
         try {
-          wakeLockRef.current = await navigator.wakeLock.request('screen')
+          wakeLockRef.current = await (navigator as any).wakeLock.request('screen')
           setState(prev => ({ ...prev, isActive: true, error: null }))
           
           // Handle release
@@ -83,7 +83,7 @@ export function useWakeLock(): UseWakeLockReturn {
 
     try {
       requestedRef.current = true
-      wakeLockRef.current = await navigator.wakeLock.request('screen')
+      wakeLockRef.current = await (navigator as any).wakeLock.request('screen')
       
       setState(prev => ({ 
         ...prev, 
@@ -150,20 +150,13 @@ export function useWakeLock(): UseWakeLockReturn {
   }
 }
 
-// Type declaration for WakeLock API
-declare global {
-  interface Navigator {
-    wakeLock: {
-      request: (type: 'screen') => Promise<WakeLockSentinel>
-    }
-  }
-
-  interface WakeLockSentinel extends EventTarget {
-    type: 'screen'
-    released: boolean
-    release: () => Promise<void>
-    addEventListener(type: 'release', listener: () => void): void
-    removeEventListener(type: 'release', listener: () => void): void
-  }
+// Type declarations for WakeLock API
+// Using interface merging to augment Navigator if types don't exist
+interface WakeLockSentinel extends EventTarget {
+  readonly type: 'screen'
+  readonly released: boolean
+  release(): Promise<void>
+  addEventListener(type: 'release', listener: () => void): void
+  removeEventListener(type: 'release', listener: () => void): void
 }
 
