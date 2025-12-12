@@ -51,10 +51,12 @@ export function useWakeLock(): UseWakeLockReturn {
           setState(prev => ({ ...prev, isActive: true, error: null }))
           
           // Handle release
-          wakeLockRef.current.addEventListener('release', () => {
-            wakeLockRef.current = null
-            setState(prev => ({ ...prev, isActive: false }))
-          })
+          if (wakeLockRef.current) {
+            wakeLockRef.current.addEventListener('release', () => {
+              wakeLockRef.current = null
+              setState(prev => ({ ...prev, isActive: false }))
+            })
+          }
         } catch (err) {
           // Silently fail on re-acquire - user may have navigated away
           console.log('Wake lock re-acquire failed:', err)
@@ -92,10 +94,12 @@ export function useWakeLock(): UseWakeLockReturn {
       }))
 
       // Listen for release (e.g., when tab becomes hidden)
-      wakeLockRef.current.addEventListener('release', () => {
-        wakeLockRef.current = null
-        setState(prev => ({ ...prev, isActive: false }))
-      })
+      if (wakeLockRef.current) {
+        wakeLockRef.current.addEventListener('release', () => {
+          wakeLockRef.current = null
+          setState(prev => ({ ...prev, isActive: false }))
+        })
+      }
 
       return true
     } catch (err: any) {
