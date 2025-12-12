@@ -305,6 +305,13 @@ export function useRunTracking({
     
     const supabase = supabaseRef.current
     
+    // Fetch current session to preserve existing top_speed_kmh
+    const { data: currentSession } = await supabase
+      .from('ski_sessions')
+      .select('top_speed_kmh')
+      .eq('id', sessionIdRef.current)
+      .single()
+    
     // Calculate metrics from location_history
     const { data: metrics } = await supabase
       .rpc('calculate_session_metrics', { p_session_id: sessionIdRef.current })
@@ -328,7 +335,7 @@ export function useRunTracking({
         is_active: false,
         total_distance_meters: metrics?.[0]?.total_distance || 0,
         total_vertical_meters: metrics?.[0]?.total_vertical || 0,
-        top_speed_kmh: Math.max(session.top_speed_kmh || 0, maxSpeed),
+        top_speed_kmh: Math.max(currentSession?.top_speed_kmh || 0, maxSpeed),
         avg_speed_kmh: avgSpeed
       })
       .eq('id', sessionIdRef.current)
