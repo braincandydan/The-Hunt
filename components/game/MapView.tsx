@@ -43,6 +43,13 @@ interface MapViewProps {
 }
 
 export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatures = [], resortName = 'Resort', onSpeedUpdate, onLocationUpdate, scene3DUrl, scene3DCenter, additionalGeoJSONPaths }: MapViewProps) {
+  // DEBUG: Track component renders
+  const renderCountRef = useRef(0)
+  renderCountRef.current++
+  if (process.env.NODE_ENV === 'development') {
+    console.log(`[RENDER #${renderCountRef.current}] MapView component rendering`)
+  }
+  
   const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d') // Toggle between 2D and 3D-Three.js
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<any>(null) // Use any to avoid type issues before Leaflet loads
@@ -73,6 +80,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   const locationWatchIdRef = useRef<number | null>(null) // Reference to the watchPosition ID
   const hasCenteredOnUserRef = useRef(false) // Track if we've centered on user location already
   const isMountedRef = useRef(true) // Track if component is mounted
+  const shouldTrackLocationRef = useRef(false) // Track desired tracking state (avoids closure issues)
 
   // Track plugin loading states
   const esriLeafletLoadedRef = useRef(false)
@@ -81,8 +89,14 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   // Track component mount state to prevent operations after unmount
   useEffect(() => {
     isMountedRef.current = true
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:92',message:'component mounted',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+    // #endregion
     return () => {
       isMountedRef.current = false
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:96',message:'component unmounting',data:{markerExists:!!userLocationMarkerRef.current},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+      // #endregion
     }
   }, [])
   
@@ -95,29 +109,110 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   
   // Throttle location updates to parent (max once per second)
   const lastLocationUpdateTimeRef = useRef<number>(0)
+  
+  // Throttle state updates to prevent excessive re-renders
+  const lastStateUpdateTimeRef = useRef<number>(0)
+  const STATE_UPDATE_THROTTLE = 2000 // Update state max once per 2 seconds
 
-  // Report location updates to parent for run tracking (throttled)
+  // Store location in ref to avoid effect dependencies
+  const userLocationRef = useRef(userLocation)
+  const userSpeedRef = useRef(userSpeed)
+  userLocationRef.current = userLocation
+  userSpeedRef.current = userSpeed
+  
+  // Report tracking state changes to parent (not location updates - those happen in watchPosition callback)
   useEffect(() => {
+    console.log('[EFFECT] Tracking state changed effect running', { isTrackingLocation, hasCallback: !!onLocationUpdateRef.current })
+    
     if (!onLocationUpdateRef.current) return
     
     // Report tracking state changes immediately
     if (!isTrackingLocation) {
+      console.log('[EFFECT] Tracking disabled, sending null to parent')
       onLocationUpdateRef.current(null, false)
+      lastLocationUpdateTimeRef.current = 0 // Reset throttle
+    }
+    // Don't send location here - it's sent from watchPosition callback
+  }, [isTrackingLocation]) // Only run when tracking state changes
+  
+  // REMOVED: Periodic update - it was causing constant re-renders
+  // Location updates are already handled by the throttled effect above
+  
+  // Ensure marker is visible when we have location and tracking is active
+  // Only create marker once when tracking starts - position updates happen in the watchPosition callback
+  useEffect(() => {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:137',message:'marker creation effect running',data:{isTrackingLocation,hasUserLocation:!!userLocation,hasMap:!!map.current,leafletLoaded,markerExists:!!userLocationMarkerRef.current},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+    // #endregion
+    if (!isTrackingLocation || !userLocation || !map.current || !leafletLoaded) {
       return
     }
     
-    // Throttle location updates to once per second
-    const now = Date.now()
-    if (userLocation && now - lastLocationUpdateTimeRef.current >= 1000) {
-      lastLocationUpdateTimeRef.current = now
-      onLocationUpdateRef.current({
-        lat: userLocation[0],
-        lng: userLocation[1],
-        altitude: lastAltitudeRef.current,
-        speed: userSpeed || undefined
-      }, true)
+    // If marker already exists, don't recreate it (position updates happen in watchPosition callback)
+    if (userLocationMarkerRef.current) {
+      // #region agent log
+      const isOnMap = map.current.hasLayer(userLocationMarkerRef.current)
+      fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:144',message:'marker already exists check',data:{markerExists:!!userLocationMarkerRef.current,isOnMap},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+      // #endregion
+      return
     }
-  }, [userLocation, isTrackingLocation, userSpeed])
+    
+    const L = (window as any).L
+    if (!L) return
+    
+    // Wait a tick to ensure map is fully ready
+    const timeoutId = setTimeout(() => {
+      if (!map.current || !isTrackingLocation || !userLocation) return
+      
+      // Check if map container exists
+      try {
+        const container = map.current.getContainer()
+        if (!container || !container.parentElement) {
+          return
+        }
+      } catch (err) {
+        return
+      }
+      
+      // Create marker once
+      if (!userLocationMarkerRef.current) {
+        try {
+          const location: [number, number] = userLocation
+          if (process.env.NODE_ENV === 'development') {
+            console.log('Creating marker immediately from existing location:', location)
+          }
+          
+          const redIcon = L.divIcon({
+            className: 'user-location-marker-div',
+            html: '<div style="width: 30px; height: 30px; background-color: #FF0000; border: 4px solid #FFFFFF; border-radius: 50%; box-shadow: 0 0 0 4px rgba(255, 0, 0, 0.5), 0 0 20px rgba(255, 0, 0, 0.8); animation: pulse 2s infinite;"></div>',
+            iconSize: [30, 30],
+            iconAnchor: [15, 15],
+          })
+          
+          userLocationMarkerRef.current = L.marker(location, {
+            icon: redIcon,
+            zIndexOffset: 10000,
+            riseOnHover: false,
+          })
+          userLocationMarkerRef.current.addTo(map.current)
+          
+          // Set z-index on element
+          const markerElement = userLocationMarkerRef.current.getElement()
+          if (markerElement) {
+            markerElement.style.zIndex = '10000'
+          }
+          
+          if (process.env.NODE_ENV === 'development') {
+            console.log('Marker created successfully, on map:', map.current.hasLayer(userLocationMarkerRef.current))
+          }
+        } catch (err) {
+          console.error('Failed to create marker from existing location:', err)
+        }
+      }
+    }, 50) // Small delay to avoid map transition conflicts
+    
+    return () => clearTimeout(timeoutId)
+  }, [isTrackingLocation, leafletLoaded]) // Removed userLocation - marker position updates happen in watchPosition callback
 
   // Load Leaflet only on client side - plugins loaded on-demand
   useEffect(() => {
@@ -307,18 +402,14 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     }
 
     return () => {
-      // Cleanup location tracking
+      // Cleanup location tracking (only if component is unmounting, not just re-rendering)
+      // Don't remove marker here - it's managed by the location tracking effect
       if (locationWatchIdRef.current !== null) {
         navigator.geolocation.clearWatch(locationWatchIdRef.current)
         locationWatchIdRef.current = null
       }
-      if (userLocationMarkerRef.current) {
-        if ((userLocationMarkerRef.current as any).accuracyCircle) {
-          map.current?.removeLayer((userLocationMarkerRef.current as any).accuracyCircle)
-        }
-        map.current?.removeLayer(userLocationMarkerRef.current)
-        userLocationMarkerRef.current = null
-      }
+      // Don't remove marker in map cleanup - let the location tracking effect handle it
+      // The marker will be removed when tracking is disabled or component unmounts
 
       // Cleanup
       if (map.current) {
@@ -369,17 +460,78 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       const L = (window as any).L
       if (L) {
         // Update markers when discoveredSignIds changes
+        // IMPORTANT: Check refs at the right time - marker might be created asynchronously
+        // Check refs AFTER removing sign markers to ensure we have the latest marker reference
+        const wasUserMarkerOnMap = userLocationMarkerRef.current && map.current?.hasLayer(userLocationMarkerRef.current)
+        
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:457',message:'removing all markers for update',data:{userMarkerExists:!!userLocationMarkerRef.current,wasOnMap:wasUserMarkerOnMap},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+        
+        // Temporarily remove user marker to protect it from being removed by marker.remove()
+        if (userLocationMarkerRef.current && map.current?.hasLayer(userLocationMarkerRef.current)) {
+          map.current.removeLayer(userLocationMarkerRef.current)
+        }
+        const userAccuracyCircle = userLocationMarkerRef.current ? (userLocationMarkerRef.current as any).accuracyCircle : null
+        if (userAccuracyCircle && map.current?.hasLayer(userAccuracyCircle)) {
+          map.current.removeLayer(userAccuracyCircle)
+        }
+        
+        // Remove sign markers (not user location marker)
         markersRef.current.forEach((marker) => marker.remove())
         markersRef.current = []
         addMarkers()
+        
+        // Re-add user location marker if it exists
+        // Check refs AGAIN after removing markers - marker might have been created in the meantime
+        const userMarker = userLocationMarkerRef.current // Re-check ref - might have been set by watchPosition callback
+        const shouldTrack = shouldTrackLocationRef.current
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:480',message:'checking if should re-add marker',data:{isTrackingLocation,shouldTrack,hasUserMarker:!!userMarker,hasMap:!!map.current},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+        // Re-add marker if it exists - the marker itself indicates tracking was active
+        // Use ref to check tracking state (persists across re-renders)
+        if (shouldTrack && userMarker && map.current) {
+          // #region agent log
+          const isOnMapBeforeReadd = map.current.hasLayer(userMarker)
+          fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:482',message:'re-adding user marker',data:{markerExists:!!userMarker,isOnMapBefore:isOnMapBeforeReadd},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+          // #endregion
+          if (!isOnMapBeforeReadd) {
+            userMarker.addTo(map.current)
+            const markerElement = userMarker.getElement()
+            if (markerElement) {
+              markerElement.style.zIndex = '10000'
+            }
+            // #region agent log
+            const isOnMapAfterReadd = map.current.hasLayer(userMarker)
+            fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:490',message:'after re-adding marker',data:{isOnMap:isOnMapAfterReadd},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+            // #endregion
+          }
+          if (userAccuracyCircle && !map.current.hasLayer(userAccuracyCircle)) {
+            userAccuracyCircle.addTo(map.current)
+          }
+        } else {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:504',message:'NOT re-adding marker - conditions not met',data:{isTrackingLocation,shouldTrack,hasUserMarker:!!userMarker,hasMap:!!map.current},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+          // #endregion
+        }
       }
     }
-  }, [discoveredSignIds, leafletLoaded])
+  }, [discoveredSignIds, leafletLoaded]) // Removed isTrackingLocation - use ref instead to avoid stale closures
 
   // Location tracking effect
   useEffect(() => {
+    console.log('[EFFECT] Location tracking effect running', { isTrackingLocation, leafletLoaded, window: typeof window })
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:477',message:'location tracking effect running',data:{isTrackingLocation,leafletLoaded,markerExists:!!userLocationMarkerRef.current},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+    // #endregion
+    
+    // Update ref to track desired state
+    shouldTrackLocationRef.current = isTrackingLocation
+    
     // Early exit conditions - don't start tracking if prerequisites aren't met
     if (!leafletLoaded || typeof window === 'undefined') {
+      console.log('[EFFECT] Early exit - prerequisites not met')
       return
     }
 
@@ -388,26 +540,39 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
 
     // Handle tracking state changes
     if (!isTrackingLocation) {
+      console.log('[EFFECT] Tracking disabled, cleaning up...')
       // Clean up when tracking is disabled
       if (locationWatchIdRef.current !== null) {
         navigator.geolocation.clearWatch(locationWatchIdRef.current)
         locationWatchIdRef.current = null
       }
       if (userLocationMarkerRef.current && map.current) {
-        if ((userLocationMarkerRef.current as any).accuracyCircle) {
-          map.current.removeLayer((userLocationMarkerRef.current as any).accuracyCircle)
-        }
+      console.log('[EFFECT] Removing marker (tracking disabled)')
+      // #region agent log
+      const markerBeforeRemove = !!userLocationMarkerRef.current
+      const wasOnMapBeforeRemove = markerBeforeRemove && map.current?.hasLayer(userLocationMarkerRef.current)
+      fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:520',message:'removing marker - tracking disabled',data:{markerExists:markerBeforeRemove,wasOnMap:wasOnMapBeforeRemove,isTrackingLocation},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+      if ((userLocationMarkerRef.current as any).accuracyCircle) {
+        map.current.removeLayer((userLocationMarkerRef.current as any).accuracyCircle)
+      }
+      if (userLocationMarkerRef.current) {
         map.current.removeLayer(userLocationMarkerRef.current)
-        userLocationMarkerRef.current = null
+      }
+      userLocationMarkerRef.current = null
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:535',message:'marker removed - ref set to null',data:{markerExists:!!userLocationMarkerRef.current},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
       }
       // Reset the centered flag so we center again next time
       hasCenteredOnUserRef.current = false
       setUserLocation(null)
       setUserSpeed(null)
-      setTopSpeed(0)
-      setSpeedHistory([])
-      return
+      return // Exit early - don't start tracking
     }
+    
+    // Tracking is enabled - start watchPosition
+    console.log('[EFFECT] Tracking enabled, starting watchPosition...')
 
     // Don't start tracking if map isn't ready
     if (!map.current) {
@@ -423,6 +588,16 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     
     // Already watching - don't start again
     if (locationWatchIdRef.current !== null) {
+      // But ensure marker is visible if it exists
+      if (userLocationMarkerRef.current && map.current) {
+        if (!map.current.hasLayer(userLocationMarkerRef.current)) {
+          userLocationMarkerRef.current.addTo(map.current)
+          const markerElement = userLocationMarkerRef.current.getElement()
+          if (markerElement) {
+            markerElement.style.zIndex = '10000'
+          }
+        }
+      }
       return
     }
 
@@ -432,116 +607,263 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     // Start watching position
     locationWatchIdRef.current = navigator.geolocation.watchPosition(
       (position) => {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:547',message:'watchPosition callback called',data:{hasMounted:isMountedRef.current,hasMap:!!map.current},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+        // #endregion
+        console.log('[WATCHPOSITION] Location received, checking guards...')
+        
         // Guard: Check if component is still mounted and map exists
         if (!isMountedRef.current || !map.current) {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:551',message:'watchPosition guards failed',data:{isMounted:isMountedRef.current,hasMap:!!map.current},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+          // #endregion
+          if (process.env.NODE_ENV === 'development') {
+            console.warn('[WATCHPOSITION] Location update skipped - component unmounted or map not ready')
+          }
           return
         }
         
+        console.log('[WATCHPOSITION] Guards passed, processing location...')
         const { latitude, longitude, accuracy, speed, altitude } = position.coords
         const location: [number, number] = [latitude, longitude]
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:560',message:'location extracted',data:{lat:latitude,lng:longitude},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+        // #endregion
         
-        setUserLocation(location)
-        setLocationError(null)
-        
-        // Store altitude for run tracking
+        // Always update refs immediately (no re-render)
+        userLocationRef.current = location
         if (altitude !== null) {
           lastAltitudeRef.current = altitude
         }
-
-        // Convert speed from m/s to km/h (speed can be null if not available)
-        if (speed !== null && speed !== undefined && !isNaN(speed)) {
-          const speedKmh = speed * 3.6 // Convert m/s to km/h
-          setUserSpeed(speedKmh)
-          
-          // Update speed history
-          setSpeedHistory((prevHistory) => {
-            return [...prevHistory, speedKmh].slice(-100) // Keep last 100 readings
-          })
-          
-          // Update top speed
-          setTopSpeed((prevTop) => {
-            return speedKmh > prevTop ? speedKmh : prevTop
-          })
-        } else {
-          setUserSpeed(null)
+        
+        // Send location update to parent (throttled, no state update = no re-render)
+        const now = Date.now()
+        if (onLocationUpdateRef.current && (now - lastLocationUpdateTimeRef.current >= 1000)) {
+          lastLocationUpdateTimeRef.current = now
+          console.log('[LOCATION] Sending update to parent (throttled)', location)
+          onLocationUpdateRef.current({
+            lat: location[0],
+            lng: location[1],
+            altitude: lastAltitudeRef.current,
+            speed: userSpeedRef.current || undefined
+          }, true)
+        }
+        
+        // Throttle state updates to prevent excessive re-renders
+        const timeSinceLastStateUpdate = now - lastStateUpdateTimeRef.current
+        
+        // Only update state if enough time has passed (throttled to prevent flickering)
+        if (timeSinceLastStateUpdate >= STATE_UPDATE_THROTTLE) {
+          lastStateUpdateTimeRef.current = now
+          console.log('[LOCATION] Setting userLocation state (throttled)', location, `after ${timeSinceLastStateUpdate}ms`)
+          setUserLocation(location)
+          setLocationError(null)
         }
 
-        // Guard: Double-check map still exists before Leaflet operations
+        // Convert speed from m/s to km/h (speed can be null if not available)
+        // Store in ref immediately (no re-render)
+        if (speed !== null && speed !== undefined && !isNaN(speed)) {
+          const speedKmh = speed * 3.6 // Convert m/s to km/h
+          userSpeedRef.current = speedKmh
+          
+          // Only update state if enough time has passed (throttled)
+          if (timeSinceLastStateUpdate >= STATE_UPDATE_THROTTLE) {
+            setUserSpeed(speedKmh)
+            
+            // Update speed history
+            setSpeedHistory((prevHistory) => {
+              return [...prevHistory, speedKmh].slice(-100) // Keep last 100 readings
+            })
+            
+            // Update top speed
+            setTopSpeed((prevTop) => {
+              return speedKmh > prevTop ? speedKmh : prevTop
+            })
+          }
+        } else {
+          userSpeedRef.current = null
+          // Only update state if throttled
+          if (timeSinceLastStateUpdate >= STATE_UPDATE_THROTTLE) {
+            setUserSpeed(null)
+          }
+        }
+
+        // Guard: Double-check map still exists and is ready before Leaflet operations
         const currentMap = map.current
         if (!currentMap) {
+          console.warn('[MARKER] Map not available, skipping marker update')
           return
         }
         
+        // Check if map container still exists in DOM
+        try {
+          const container = currentMap.getContainer()
+          if (!container || !container.parentElement) {
+            if (process.env.NODE_ENV === 'development') {
+              console.warn('[MARKER] Map container not in DOM, skipping marker update')
+            }
+            return
+          }
+        } catch (err) {
+          console.error('[MARKER] Error checking map container:', err)
+          // Map might be destroyed
+          return
+        }
+        
+        console.log('[MARKER] About to create/update marker, current marker exists:', !!userLocationMarkerRef.current)
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:641',message:'marker creation check',data:{markerExists:!!userLocationMarkerRef.current,mapExists:!!currentMap,location},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
         try {
           // Always ensure marker exists and is on the map when tracking is enabled
           if (!userLocationMarkerRef.current) {
-            // Create a circle marker for user location with high z-index to ensure visibility
-            userLocationMarkerRef.current = L.circleMarker(location, {
-              radius: 10,
-              fillColor: '#3388ff',
-              color: '#ffffff',
-              weight: 3,
-              opacity: 1,
-              fillOpacity: 0.8,
-              className: 'user-location-marker',
+            console.log('[MARKER] Creating location marker at:', location)
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:645',message:'marker creation starting',data:{location},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
+            
+            // Create a DIV icon marker for maximum visibility and control
+            const redIcon = L.divIcon({
+              className: 'user-location-marker-div',
+              html: '<div style="width: 30px; height: 30px; background-color: #FF0000; border: 4px solid #FFFFFF; border-radius: 50%; box-shadow: 0 0 0 4px rgba(255, 0, 0, 0.5), 0 0 20px rgba(255, 0, 0, 0.8); animation: pulse 2s infinite;"></div>',
+              iconSize: [30, 30],
+              iconAnchor: [15, 15],
             })
+            
+            // Create marker with the custom icon
+            userLocationMarkerRef.current = L.marker(location, {
+              icon: redIcon,
+              zIndexOffset: 10000,
+              riseOnHover: false,
+            })
+            
+            console.log('[MARKER] Marker created, adding to map...')
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:664',message:'before addTo',data:{markerCreated:!!userLocationMarkerRef.current},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
+            // Add to map immediately
             userLocationMarkerRef.current.addTo(currentMap)
-            // Bring to front to ensure it's always visible
-            userLocationMarkerRef.current.bringToFront()
+            // #region agent log
+            const isOnMapAfterAdd = currentMap.hasLayer(userLocationMarkerRef.current)
+            fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:666',message:'after addTo',data:{isOnMap:isOnMapAfterAdd},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
+            
+            // Ensure marker is on top by setting z-index on the icon element
+            const markerElement = userLocationMarkerRef.current.getElement()
+            if (markerElement) {
+              markerElement.style.zIndex = '10000'
+              // #region agent log
+              const computedStyle = window.getComputedStyle(markerElement)
+              fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:670',message:'marker element styles',data:{zIndex:markerElement.style.zIndex,display:computedStyle.display,opacity:computedStyle.opacity,visibility:computedStyle.visibility},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+              // #endregion
+              console.log('[MARKER] Marker element found, z-index set:', markerElement.style.zIndex)
+            } else {
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:672',message:'marker element NOT found',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+              // #endregion
+              console.error('[MARKER] Marker element NOT found!')
+            }
+            
+            const isOnMap = currentMap.hasLayer(userLocationMarkerRef.current)
+            const markerPos = userLocationMarkerRef.current.getLatLng()
+            const mapBounds = currentMap.getBounds()
+            const mapCenter = currentMap.getCenter()
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:677',message:'marker position and map bounds',data:{isOnMap,markerPos:{lat:markerPos.lat,lng:markerPos.lng},mapBounds:{south:mapBounds.getSouth(),north:mapBounds.getNorth(),east:mapBounds.getEast(),west:mapBounds.getWest()},mapCenter:{lat:mapCenter.lat,lng:mapCenter.lng},inBounds:mapBounds.contains(markerPos)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+            // #endregion
+            console.log('[MARKER] Marker on map:', isOnMap)
+            console.log('[MARKER] Marker position:', markerPos)
 
             // Add accuracy circle
             const accuracyCircle = L.circle(location, {
-              radius: accuracy,
+              radius: Math.max(accuracy || 20, 20), // Minimum 20m radius
               fillColor: '#3388ff',
               color: '#3388ff',
-              weight: 1,
-              opacity: 0.3,
-              fillOpacity: 0.1,
+              weight: 2,
+              opacity: 0.4,
+              fillOpacity: 0.15,
               className: 'user-location-accuracy',
             })
             accuracyCircle.addTo(currentMap)
 
             // Store accuracy circle reference in the marker (for cleanup)
             ;(userLocationMarkerRef.current as any).accuracyCircle = accuracyCircle
+            
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:694',message:'marker creation complete',data:{markerExists:!!userLocationMarkerRef.current,isOnMap:currentMap.hasLayer(userLocationMarkerRef.current)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
+            console.log('[MARKER] Marker creation complete')
           } else {
             // Ensure marker is still on the map (in case it was removed)
-            if (!currentMap.hasLayer(userLocationMarkerRef.current)) {
+            const isOnMap = currentMap.hasLayer(userLocationMarkerRef.current)
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:697',message:'marker update check',data:{markerExists:!!userLocationMarkerRef.current,isOnMap},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+            // #endregion
+            if (!isOnMap) {
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:700',message:'marker was removed - re-adding',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+              // #endregion
+              if (process.env.NODE_ENV === 'development') {
+                console.warn('Marker was removed from map, re-adding...')
+              }
               userLocationMarkerRef.current.addTo(currentMap)
-              userLocationMarkerRef.current.bringToFront()
+              if (userLocationMarkerRef.current.setZIndexOffset) {
+                userLocationMarkerRef.current.setZIndexOffset(10000)
+              }
+              const markerElement = userLocationMarkerRef.current.getElement()
+              if (markerElement) {
+                markerElement.style.zIndex = '10000'
+              }
+              // #region agent log
+              const isOnMapAfterReadd = currentMap.hasLayer(userLocationMarkerRef.current)
+              fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:710',message:'after re-adding marker',data:{isOnMap:isOnMapAfterReadd},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+              // #endregion
             }
             // Ensure accuracy circle is on the map
             const accuracyCircle = (userLocationMarkerRef.current as any).accuracyCircle
-            if (accuracyCircle && !currentMap.hasLayer(accuracyCircle)) {
-              accuracyCircle.addTo(currentMap)
+            if (accuracyCircle) {
+              if (!currentMap.hasLayer(accuracyCircle)) {
+                accuracyCircle.addTo(currentMap)
+              }
             }
           }
           
-          // Center map on user location (first time only)
-          // Use panTo instead of setView to avoid zoom transitions that cause _leaflet_pos errors
-          if (!hasCenteredOnUserRef.current && currentMap) {
+          // Don't auto-center map - user controls map view
+          // Just mark that we've seen the first location
+          if (!hasCenteredOnUserRef.current) {
             hasCenteredOnUserRef.current = true
-            try {
-              // Just pan to location without changing zoom - avoids zoom transition errors
-              currentMap.panTo(location, { animate: false })
-            } catch (err) {
-              // Silently ignore - map may not be ready
-            }
           }
           
           // Always update marker position to keep it visible
           if (userLocationMarkerRef.current) {
+            console.log('[MARKER] Updating marker position to:', location)
+            const isOnMapBefore = currentMap.hasLayer(userLocationMarkerRef.current)
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:730',message:'updating marker position',data:{isOnMapBefore,location},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+            // #endregion
             userLocationMarkerRef.current.setLatLng(location)
-            userLocationMarkerRef.current.bringToFront() // Keep it on top
+            const isOnMap = currentMap.hasLayer(userLocationMarkerRef.current)
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:735',message:'after position update',data:{isOnMap},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+            // #endregion
+            console.log('[MARKER] Marker on map after update:', isOnMap)
+            
+            // Ensure z-index is set
+            const markerElement = userLocationMarkerRef.current.getElement()
+            if (markerElement) {
+              markerElement.style.zIndex = '10000'
+            }
+            
             // Update accuracy circle
             if ((userLocationMarkerRef.current as any).accuracyCircle) {
               const accCircle = (userLocationMarkerRef.current as any).accuracyCircle
               accCircle.setLatLng(location)
-              accCircle.setRadius(accuracy)
+              accCircle.setRadius(Math.max(accuracy || 20, 20))
             }
           }
         } catch (err) {
-          // Silently handle Leaflet errors (map may have been destroyed)
-          console.warn('Location marker update failed:', err)
+          // Log errors for debugging
+          console.error('Location marker update failed:', err)
         }
       },
       (error) => {
@@ -559,22 +881,30 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
         }
         
         let errorMessage = 'Unable to get your location'
+        let shouldStopTracking = false
         
         // GeolocationPositionError codes: 1=PERMISSION_DENIED, 2=POSITION_UNAVAILABLE, 3=TIMEOUT
         switch (errorCode) {
           case 1: // PERMISSION_DENIED
             errorMessage = 'Location permission denied. Please enable location access in your browser settings.'
+            shouldStopTracking = true // Only stop on permission denied
             break
           case 2: // POSITION_UNAVAILABLE
             errorMessage = 'Location information is unavailable. Make sure location services are enabled.'
+            // Don't stop tracking - might be temporary (e.g., in tunnel)
             break
           case 3: // TIMEOUT
-            errorMessage = 'Location request timed out. Please try again.'
+            errorMessage = 'Location request timed out. Retrying...'
+            // Don't stop tracking - timeout is often temporary
             break
         }
         
         setLocationError(errorMessage)
-        setIsTrackingLocation(false)
+        
+        // Only stop tracking on permanent errors (permission denied)
+        if (shouldStopTracking) {
+          setIsTrackingLocation(false)
+        }
       },
       {
         enableHighAccuracy: true,
@@ -583,28 +913,35 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       }
     )
 
-    // Cleanup function
+    // Cleanup function - only runs when effect dependencies change or component unmounts
     return () => {
-      // Stop watching position
-      if (locationWatchIdRef.current !== null) {
-        navigator.geolocation.clearWatch(locationWatchIdRef.current)
-        locationWatchIdRef.current = null
-      }
-      
-      // Clean up markers - use map.current (fresh ref) not captured mapInstance
-      try {
-        const currentMap = map.current
-        if (userLocationMarkerRef.current && currentMap) {
-          // Remove accuracy circle if it exists
-          if ((userLocationMarkerRef.current as any).accuracyCircle) {
-            currentMap.removeLayer((userLocationMarkerRef.current as any).accuracyCircle)
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:845',message:'cleanup function called',data:{shouldTrack:shouldTrackLocationRef.current,markerExists:!!userLocationMarkerRef.current},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+      // Only clear watch if tracking is actually being disabled (check ref, not closure)
+      // IMPORTANT: Don't remove the marker here - it's managed by the watchPosition callback
+      // Only clear the watch, the marker will be removed when tracking is actually disabled
+      if (!shouldTrackLocationRef.current) {
+        if (locationWatchIdRef.current !== null) {
+          if (process.env.NODE_ENV === 'development') {
+            console.log('[CLEANUP] Clearing location watch (tracking disabled)')
           }
-          currentMap.removeLayer(userLocationMarkerRef.current)
+          navigator.geolocation.clearWatch(locationWatchIdRef.current)
+          locationWatchIdRef.current = null
         }
-      } catch (err) {
-        // Silently handle - map may already be destroyed
+        
+        // Only clean up markers when tracking is actually disabled
+        // Don't remove marker here - let the watchPosition callback handle it
+        // or remove it in the explicit cleanup when isTrackingLocation becomes false
+      } else {
+        // Tracking is still active - don't clear the watch, just let effect re-run
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:862',message:'cleanup - tracking still active',data:{shouldTrack:shouldTrackLocationRef.current,markerExists:!!userLocationMarkerRef.current},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+        if (process.env.NODE_ENV === 'development') {
+          console.log('[CLEANUP] Effect re-running but tracking still active - keeping watch and marker')
+        }
       }
-      userLocationMarkerRef.current = null
     }
   }, [isTrackingLocation, leafletLoaded])
 
@@ -806,17 +1143,25 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
 
     if (isTrackingLocation) {
       // Stop tracking
+      if (process.env.NODE_ENV === 'development') {
+        console.log('Stopping location tracking')
+      }
       setIsTrackingLocation(false)
     } else {
       // Start tracking - request permission first
       navigator.geolocation.getCurrentPosition(
-        () => {
+        (position) => {
           // Permission granted, start tracking
           setIsTrackingLocation(true)
           setLocationError(null)
+          
+          // Immediately set location so marker can be created
+          const { latitude, longitude } = position.coords
+          setUserLocation([latitude, longitude])
         },
         (error) => {
           // Permission denied or error
+          console.error('Location permission error:', error)
           let errorMessage = 'Unable to get your location'
           if (error.code === error.PERMISSION_DENIED) {
             errorMessage = 'Location permission denied. Please enable location access in your browser settings.'
@@ -825,7 +1170,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
         },
         {
           enableHighAccuracy: true,
-          timeout: 5000,
+          timeout: 10000, // Increased timeout
         }
       )
     }
@@ -1064,7 +1409,20 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   useEffect(() => {
     if (map.current && skiFeatures.length > 0) {
       // Update ski features when they change
-      layersRef.current.forEach((layer) => map.current?.removeLayer(layer))
+      // #region agent log
+      const userMarkerOnMap = userLocationMarkerRef.current && map.current?.hasLayer(userLocationMarkerRef.current)
+      fetch('http://127.0.0.1:7242/ingest/fc98da6b-d1d3-4e78-9f6b-0a88a8cf2d28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'MapView.tsx:1410',message:'removing ski feature layers',data:{userMarkerExists:!!userLocationMarkerRef.current,isOnMap:userMarkerOnMap},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+      // Filter out null/undefined layers before removing
+      layersRef.current.filter(layer => layer != null).forEach((layer) => {
+        try {
+          if (map.current?.hasLayer(layer)) {
+            map.current.removeLayer(layer)
+          }
+        } catch (e) {
+          // Ignore errors - layer might already be removed
+        }
+      })
       layersRef.current = []
       // Clear old labels and arrows
       if (map.current) {
@@ -1080,9 +1438,26 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
         })
         textpathLayersRef.current = []
         
-        labelsRef.current.forEach((label) => map.current!.removeLayer(label))
+        // Filter out null/undefined before removing
+        labelsRef.current.filter(label => label != null).forEach((label) => {
+          try {
+            if (map.current?.hasLayer(label)) {
+              map.current.removeLayer(label)
+            }
+          } catch (e) {
+            // Ignore errors
+          }
+        })
         labelsRef.current = []
-        arrowsRef.current.forEach((arrow) => map.current!.removeLayer(arrow))
+        arrowsRef.current.filter(arrow => arrow != null).forEach((arrow) => {
+          try {
+            if (map.current?.hasLayer(arrow)) {
+              map.current.removeLayer(arrow)
+            }
+          } catch (e) {
+            // Ignore errors
+          }
+        })
         arrowsRef.current = []
       }
       addSkiFeatures()

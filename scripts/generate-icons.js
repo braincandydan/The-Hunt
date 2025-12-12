@@ -73,3 +73,5 @@ try {
 
 console.log('\nIcon generation complete!');
 
+
+

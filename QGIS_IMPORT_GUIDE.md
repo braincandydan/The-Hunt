@@ -238,3 +238,5 @@ npx tsx scripts/fix-supabase-geojson.ts input.json output.json
 # Open attribute table to see features
 ```
 
+
+

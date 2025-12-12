@@ -174,6 +174,9 @@ export class RunTracker {
           })
           if (speed && speed > existingRun.topSpeed) {
             existingRun.topSpeed = speed
+            if (process.env.NODE_ENV === 'development') {
+              console.log(`[RUN TRACKING] New top speed for ${existingRun.featureName}: ${speed.toFixed(1)} km/h`)
+            }
           }
           
           // Check if run is now complete (traveled most of the run)
@@ -370,4 +373,6 @@ export function runProgressToDbFormat(
     detection_method: 'gps_proximity'
   }
 }
+
+
 

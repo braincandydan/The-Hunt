@@ -201,7 +201,7 @@ export function useRunTracking({
     
     const supabase = supabaseRef.current
     
-    await supabase.from('location_history').insert({
+    const insertData = {
       session_id: sessionIdRef.current,
       user_id: userIdRef.current,
       latitude: lat,
@@ -209,8 +209,29 @@ export function useRunTracking({
       altitude_meters: altitude,
       speed_kmh: speed,
       accuracy_meters: accuracy
-    })
+    }
+    
+    // Log database save for verification
+    if (speed !== null && speed !== undefined && speed > 0) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[SPEED LOGGING] Saving to database: ${speed.toFixed(1)} km/h`)
+      }
+    }
+    
+    const { error } = await supabase.from('location_history').insert(insertData)
+    
+    if (error && process.env.NODE_ENV === 'development') {
+      console.warn('[SPEED LOGGING] Database save error:', error)
+    } else if (speed !== null && speed !== undefined && speed > 0) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[SPEED LOGGING] Successfully saved speed to database`)
+      }
+    }
   }, [saveLocationHistory, locationSaveInterval])
+  
+  // Throttle state updates to prevent excessive re-renders
+  const lastStateUpdateRef = useRef<number>(0)
+  const STATE_UPDATE_INTERVAL = 2000 // Update state max once per 2 seconds
   
   // Main location update function
   const updateLocation = useCallback((
@@ -225,24 +246,35 @@ export function useRunTracking({
     // Update tracker and get newly completed runs
     const newlyCompleted = trackerRef.current.updateLocation(lat, lng, altitude, speed)
     
-    // Save completed runs to database
+    // Save completed runs to database (async, doesn't cause re-render)
     for (const run of newlyCompleted) {
       saveRunCompletion(run)
     }
     
-    // Save location to history
+    // Save location to history (async, doesn't cause re-render)
     saveLocation(lat, lng, altitude, speed, accuracy)
     
-    // Update state
-    setState(prev => ({
-      ...prev,
-      activeRuns: trackerRef.current?.getActiveRuns() || [],
-      completedRuns: trackerRef.current?.getCompletedRuns() || [],
-      todayStats: {
-        ...prev.todayStats,
-        topSpeed: Math.max(prev.todayStats.topSpeed, trackerRef.current?.getTopSpeed() || 0)
+    // Log speed for verification (only when speed is available)
+    if (speed !== null && speed !== undefined && speed > 0) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[SPEED TRACKING] Speed recorded: ${speed.toFixed(1)} km/h at (${lat.toFixed(6)}, ${lng.toFixed(6)})`)
       }
-    }))
+    }
+    
+    // Throttle state updates to prevent excessive re-renders
+    const now = Date.now()
+    if (now - lastStateUpdateRef.current >= STATE_UPDATE_INTERVAL) {
+      lastStateUpdateRef.current = now
+      setState(prev => ({
+        ...prev,
+        activeRuns: trackerRef.current?.getActiveRuns() || [],
+        completedRuns: trackerRef.current?.getCompletedRuns() || [],
+        todayStats: {
+          ...prev.todayStats,
+          topSpeed: Math.max(prev.todayStats.topSpeed, trackerRef.current?.getTopSpeed() || 0)
+        }
+      }))
+    }
   }, [enabled, saveRunCompletion, saveLocation])
   
   // Manual run completion (e.g., from QR scan at run marker)

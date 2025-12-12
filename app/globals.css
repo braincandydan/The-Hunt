@@ -84,3 +84,28 @@ textarea,
     text-wrap: balance;
   }
 }
+
+/* Pulse animation for user location marker */
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 0, 0, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(255, 0, 0, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 0, 0, 0);
+  }
+}
+
+/* User location marker styling */
+.user-location-marker,
+.user-location-marker-div {
+  z-index: 10000 !important;
+  pointer-events: none;
+}
+
+.user-location-marker-div {
+  background: transparent !important;
+  border: none !important;
+}

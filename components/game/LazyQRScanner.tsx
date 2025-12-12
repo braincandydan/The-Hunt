@@ -22,3 +22,5 @@ export default function LazyQRScanner({ resortSlug, signId, onSuccess }: LazyQRS
   return <QRScanner resortSlug={resortSlug} signId={signId} onSuccess={onSuccess} />
 }
 
+
+

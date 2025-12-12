@@ -29,6 +29,11 @@ export default function MapPageWrapper({
   discoveredSignIds,
   skiFeatures,
 }: MapPageWrapperProps) {
+  // DEBUG: Track component renders
+  const renderCountRef = useRef(0)
+  renderCountRef.current++
+  console.log(`[RENDER #${renderCountRef.current}] MapPageWrapper component rendering`)
+  
   const router = useRouter()
   const [menuOpen, setMenuOpen] = useState(false)
   const [bottomSheetOpen, setBottomSheetOpen] = useState(false)
@@ -60,16 +65,14 @@ export default function MapPageWrapper({
   const runTrackingRef = useRef(runTracking)
   runTrackingRef.current = runTracking
   
-  useEffect(() => {
-    if (userLocation && isLocationTracking) {
-      runTrackingRef.current.updateLocation(
-        userLocation.lat,
-        userLocation.lng,
-        userLocation.altitude,
-        userLocation.speed
-      )
-    }
-  }, [userLocation, isLocationTracking])
+  // Store location in ref to avoid effect re-runs
+  const userLocationRef = useRef(userLocation)
+  const isLocationTrackingRef = useRef(isLocationTracking)
+  userLocationRef.current = userLocation
+  isLocationTrackingRef.current = isLocationTracking
+  
+  // REMOVED: Effect that was causing re-renders
+  // Location updates are handled directly in handleLocationUpdate callback
   
   // Manage wake lock based on tracking and user preference
   const wakeLockRef = useRef(wakeLock)
@@ -83,11 +86,43 @@ export default function MapPageWrapper({
     }
   }, [isLocationTracking, keepScreenAwake])
   
+  // Throttle location updates to prevent excessive re-renders
+  const lastLocationUpdateTimeRef = useRef<number>(0)
+  const LOCATION_UPDATE_THROTTLE = 1000 // Max once per second
+  
   // Callback to receive location updates from MapView
   const handleLocationUpdate = useCallback((location: { lat: number; lng: number; altitude?: number; speed?: number } | null, tracking: boolean) => {
-    setUserLocation(location)
-    setIsLocationTracking(tracking)
-  }, [])
+    const now = Date.now()
+    const timeSinceLastUpdate = now - lastLocationUpdateTimeRef.current
+    
+    console.log('[MapPageWrapper] handleLocationUpdate called', { hasLocation: !!location, tracking, timeSinceLastUpdate })
+    
+    // Update refs immediately (no re-render)
+    userLocationRef.current = location
+    const previousTracking = isLocationTrackingRef.current
+    isLocationTrackingRef.current = tracking
+    
+    // Only update state if tracking state changed OR enough time has passed
+    const trackingChanged = tracking !== previousTracking
+    const shouldUpdateState = trackingChanged || timeSinceLastUpdate >= LOCATION_UPDATE_THROTTLE
+    
+    if (shouldUpdateState) {
+      lastLocationUpdateTimeRef.current = now
+      console.log('[MapPageWrapper] Updating state (throttled)', { trackingChanged, timeSinceLastUpdate })
+      setUserLocation(location)
+      setIsLocationTracking(tracking)
+    }
+    
+    // Update run tracker directly (throttled internally, doesn't cause re-render immediately)
+    if (location && tracking) {
+      runTrackingRef.current.updateLocation(
+        location.lat,
+        location.lng,
+        location.altitude,
+        location.speed
+      )
+    }
+  }, []) // No dependencies - uses refs
 
   const foundCount = useMemo(
     () => signs.filter((s) => discoveredSignIds.has(s.id)).length,
@@ -150,22 +185,28 @@ export default function MapPageWrapper({
     </div>
   )
 
+  // Memoize skiFeatures to prevent MapView remounts
+  const memoizedSkiFeatures = useMemo(() => {
+    return skiFeatures.map(f => ({
+      id: f.id,
+      name: f.name,
+      type: f.type,
+      difficulty: f.difficulty || undefined,
+      geometry: f.geometry,
+      status: f.status || undefined,
+    }))
+  }, [skiFeatures])
+
   return (
     <div className="fixed inset-0 w-full h-full">
       {/* Map wrapped in error boundary for graceful error handling */}
       <ErrorBoundary fallback={map3DErrorFallback}>
         <MapView
+          key={`map-${resortSlug}`}
           resortSlug={resortSlug}
           signs={signs}
           discoveredSignIds={discoveredSignIds}
-          skiFeatures={skiFeatures.map(f => ({
-            id: f.id,
-            name: f.name,
-            type: f.type,
-            difficulty: f.difficulty || undefined,
-            geometry: f.geometry,
-            status: f.status || undefined,
-          }))}
+          skiFeatures={memoizedSkiFeatures}
           resortName={resort.name}
           onSpeedUpdate={setSpeedData}
           onLocationUpdate={handleLocationUpdate}
