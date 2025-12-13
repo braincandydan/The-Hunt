@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
@@ -84,15 +84,19 @@ function SessionCard({
 }) {
   const mapRef = useRef<HTMLDivElement>(null)
   const leafletMapRef = useRef<any>(null)
+  const mapInitializingRef = useRef(false) // Track if map initialization is in progress
+  const prevExpandedRef = useRef(false) // Track previous expanded state - start as false to detect first expansion
   const [mapLoaded, setMapLoaded] = useState(false)
   const [routeData, setRouteData] = useState<{ type: 'LineString', coordinates: number[][] } | null>(null)
   const [routeLoading, setRouteLoading] = useState(false)
+  const prevRouteLoadingRef = useRef(routeLoading) // Track previous route loading state - must be after routeLoading state
   const [calculatedMetrics, setCalculatedMetrics] = useState<{ topSpeed: number; avgSpeed: number; verticalMeters: number } | null>(null)
-  const supabase = createClient()
+  const supabaseRef = useRef(createClient())
+  const supabase = supabaseRef.current
   
-  // Get unique runs
-  const uniqueRunIds = new Set(completions.map(c => c.ski_feature_id))
-  const uniqueRuns = skiFeatures.filter(f => uniqueRunIds.has(f.id))
+  // Get unique runs - memoize to prevent unnecessary re-renders
+  const uniqueRunIds = useMemo(() => new Set(completions.map(c => c.ski_feature_id)), [completions])
+  const uniqueRuns = useMemo(() => skiFeatures.filter(f => uniqueRunIds.has(f.id)), [skiFeatures, uniqueRunIds])
   
   // Count by difficulty
   const byDifficulty = completions.reduce((acc, c) => {
@@ -171,6 +175,7 @@ function SessionCard({
     if (!isExpanded) {
       setRouteData(null)
       setMapLoaded(false)
+      mapInitializingRef.current = false // Reset initialization flag
       // Clean up map when collapsed
       if (leafletMapRef.current) {
         try {
@@ -181,27 +186,91 @@ function SessionCard({
         }
         leafletMapRef.current = null
       }
+      // Clear Leaflet's internal reference from container - use querySelector as fallback
+      const container = mapRef.current || (document.querySelector(`[data-session-map="${session.id}"]`) as HTMLElement)
+      if (container && (container as any)._leaflet_id) {
+        delete (container as any)._leaflet_id
+      }
     }
-  }, [isExpanded])
+  }, [isExpanded, session.id])
   
   // Load map when expanded and route data is ready (or if no route)
   useEffect(() => {
-    if (!isExpanded || !mapRef.current || mapLoaded) return
+    // Early return if collapsed - no need to do anything
+    // Cleanup is handled by the separate cleanup effect
+    if (!isExpanded) {
+      // Reset all state when collapsed (div will be unmounted by React key)
+      const wasExpanded = prevExpandedRef.current
+      prevExpandedRef.current = false // Reset to false so next expansion is detected
+      prevRouteLoadingRef.current = routeLoading
+      if (leafletMapRef.current) {
+        leafletMapRef.current = null
+      }
+      setMapLoaded(false)
+      mapInitializingRef.current = false
+      return
+    }
+    
+    // Store previous values BEFORE checking (to detect transitions)
+    const wasExpanded = prevExpandedRef.current
+    const wasRouteLoading = prevRouteLoadingRef.current
+    prevExpandedRef.current = isExpanded
+    prevRouteLoadingRef.current = routeLoading
+    
+    // Only initialize map when expanding (transitioning from collapsed to expanded)
+    // OR when route finishes loading while already expanded (but map not yet loaded)
+    const isExpanding = !wasExpanded && isExpanded
+    // Route just finished if we're expanded, route was loading but now isn't, and map is not loaded
+    const routeJustFinished = isExpanded && wasRouteLoading && !routeLoading && !mapLoaded
+    
+    if (!mapRef.current || mapLoaded || mapInitializingRef.current) {
+      return
+    }
+    
+    // Only proceed if we're expanding OR route just finished loading
+    if (!isExpanding && !routeJustFinished) {
+      return
+    }
+    
     // Wait for route to finish loading - routeData will be set (or null) when done
-    if (routeLoading) return
+    if (routeLoading) {
+      return
+    }
     // If routeData is still null but we've finished loading, that means no route exists
     // Proceed with map loading in either case
+    
+    // Set initialization flag to prevent concurrent initializations
+    mapInitializingRef.current = true
     
     const loadMap = async () => {
       const L = (await import('leaflet')).default
       await import('leaflet/dist/leaflet.css')
       
-      if (!mapRef.current || leafletMapRef.current) return
+      // Double-check conditions after async import
+      if (!mapRef.current || leafletMapRef.current) {
+        return
+      }
       
-      // Calculate bounds from route OR completed runs
+      // Check if container already has a Leaflet map instance
+      // Also check via querySelector as fallback in case ref is stale
+      const container = mapRef.current || (document.querySelector(`[data-session-map="${session.id}"]`) as HTMLElement)
+      if (container && (container as any)._leaflet_id) {
+        // If we have a leaflet ref, the map is already initialized
+        if (leafletMapRef.current) {
+          mapInitializingRef.current = false
+          setMapLoaded(true)
+          return
+        }
+        // If _leaflet_id exists but our ref is null, the map was removed but ID wasn't cleared
+        // Clear it and proceed with creating a new map
+        delete (container as any)._leaflet_id
+      }
+      
+      // Calculate bounds from route segments OR completed runs
       let bounds: [[number, number], [number, number]] | null = null
+      let routeSegments: number[][][] = []
       
-      // First, try to use route data
+      // First, try to use route data (will be processed into segments later)
       if (routeData && routeData.coordinates.length > 0) {
         for (const coord of routeData.coordinates) {
           const lat = coord[1]
@@ -219,7 +288,10 @@ function SessionCard({
       
       // Fallback to completed runs if no route
       if (!bounds) {
-        for (const feature of uniqueRuns) {
+        // Compute unique runs inside effect to avoid dependency issues
+        const uniqueRunIdsInEffect = new Set(completions.map(c => c.ski_feature_id))
+        const uniqueRunsInEffect = skiFeatures.filter(f => uniqueRunIdsInEffect.has(f.id))
+        for (const feature of uniqueRunsInEffect) {
           if (feature.geometry.type === 'LineString') {
             for (const coord of feature.geometry.coordinates) {
               const lat = coord[1]
@@ -246,6 +318,12 @@ function SessionCard({
         (bounds[0][1] + bounds[1][1]) / 2
       ]
       
+      // Final check before creating map
+      if (!mapRef.current || (mapRef.current as any)._leaflet_id) {
+        console.warn('Map container not available or already initialized')
+        return
+      }
+      
       const map = L.map(mapRef.current, {
         center,
         zoom: 13,
@@ -259,14 +337,96 @@ function SessionCard({
       }).addTo(map)
       
       // Draw GPS route from location_history (if available)
+      // Split into segments to avoid drawing lines when tracking was off
       if (routeData && routeData.coordinates.length >= 2) {
-        const routeCoords = routeData.coordinates.map(c => [c[1], c[0]] as [number, number])
-        L.polyline(routeCoords, {
-          color: '#3b82f6',
-          weight: 3,
-          opacity: 0.8,
-          smoothFactor: 1
-        }).addTo(map)
+        // Import haversineDistance for distance calculation
+        const { haversineDistance } = await import('@/lib/utils/run-tracking')
+        
+        // Get the original locations with timestamps to detect gaps
+        const { data: locations } = await supabase
+          .from('location_history')
+          .select('latitude, longitude, recorded_at')
+          .eq('session_id', session.id)
+          .order('recorded_at', { ascending: true })
+        
+        if (locations && locations.length >= 2) {
+          const MAX_TIME_GAP_MS = 5 * 60 * 1000 // 5 minutes
+          const MAX_DISTANCE_METERS = 1000 // 1km
+          
+          // Split locations into segments based on time/distance gaps
+          const segments: number[][][] = []
+          let currentSegment: number[][] = []
+          
+          for (let i = 0; i < locations.length; i++) {
+            const loc = locations[i]
+            const coord = [loc.longitude, loc.latitude] as number[]
+            
+            if (i === 0) {
+              // First point always starts a segment
+              currentSegment.push(coord)
+            } else {
+              const prevLoc = locations[i - 1]
+              const timeDiff = new Date(loc.recorded_at).getTime() - new Date(prevLoc.recorded_at).getTime()
+              const distance = haversineDistance(
+                prevLoc.latitude,
+                prevLoc.longitude,
+                loc.latitude,
+                loc.longitude
+              )
+              
+              // If gap is too large, start a new segment
+              if (timeDiff > MAX_TIME_GAP_MS || distance > MAX_DISTANCE_METERS) {
+                // Save current segment if it has at least 2 points
+                if (currentSegment.length >= 2) {
+                  segments.push(currentSegment)
+                }
+                // Start new segment
+                currentSegment = [coord]
+              } else {
+                // Continue current segment
+                currentSegment.push(coord)
+              }
+            }
+          }
+          
+          // Add the last segment if it has at least 2 points
+          if (currentSegment.length >= 2) {
+            segments.push(currentSegment)
+          }
+          
+          // Store segments for bounds calculation
+          routeSegments = segments
+          
+          // Recalculate bounds from segments
+          if (segments.length > 0) {
+            bounds = null
+            for (const segment of segments) {
+              for (const coord of segment) {
+                const lat = coord[1]
+                const lng = coord[0]
+                if (!bounds) {
+                  bounds = [[lat, lng], [lat, lng]]
+                } else {
+                  bounds[0][0] = Math.min(bounds[0][0], lat)
+                  bounds[0][1] = Math.min(bounds[0][1], lng)
+                  bounds[1][0] = Math.max(bounds[1][0], lat)
+                  bounds[1][1] = Math.max(bounds[1][1], lng)
+                }
+              }
+            }
+          }
+          
+          // Draw each segment as a separate polyline
+          for (const segment of segments) {
+            const segmentCoords = segment.map(c => [c[1], c[0]] as [number, number])
+            L.polyline(segmentCoords, {
+              color: '#3b82f6',
+              weight: 3,
+              opacity: 0.8,
+              smoothFactor: 1
+            }).addTo(map)
+          }
+        }
       }
       
       // Draw completed runs (on top of route)
@@ -279,7 +439,10 @@ function SessionCard({
         'other': '#9ca3af'
       }
       
-      for (const feature of uniqueRuns) {
+      // Compute unique runs inside effect to avoid dependency issues
+      const uniqueRunIdsInEffect = new Set(completions.map(c => c.ski_feature_id))
+      const uniqueRunsInEffect = skiFeatures.filter(f => uniqueRunIdsInEffect.has(f.id))
+      for (const feature of uniqueRunsInEffect) {
         if (feature.geometry.type === 'LineString') {
           const coords = feature.geometry.coordinates.map(c => [c[1], c[0]] as [number, number])
           L.polyline(coords, {
@@ -290,92 +453,75 @@ function SessionCard({
         }
       }
       
-      // Fit bounds
-      map.fitBounds(bounds, { padding: [20, 20] })
+      // Fit bounds with error handling
+      try {
+        if (bounds) {
+          // Use setTimeout to ensure map tiles are loaded before fitting bounds
+          setTimeout(() => {
+            try {
+              if (leafletMapRef.current && mapRef.current) {
+                leafletMapRef.current.fitBounds(bounds, { padding: [20, 20] })
+              }
+            } catch (e) {
+              console.warn('Error fitting bounds:', e)
+            }
+          }, 100)
+        }
+      } catch (e) {
+        console.warn('Error setting up bounds:', e)
+      }
       
       leafletMapRef.current = map
+      mapInitializingRef.current = false
       setMapLoaded(true)
     }
     
-    loadMap()
+    loadMap().catch((err) => {
+      // Reset flag on error
+      mapInitializingRef.current = false
+      console.error('Error loading map:', err)
+    })
     
     return () => {
       // Cleanup on unmount or when dependencies change
       if (leafletMapRef.current) {
         try {
+          // Store the container reference before it might become null
+          const container = mapRef.current
           // Check if map container still exists before removing
-          if (mapRef.current && leafletMapRef.current.getContainer()) {
-            leafletMapRef.current.remove()
+          if (container) {
+            try {
+              leafletMapRef.current.remove()
+            } catch (e) {
+              // Map might already be removed
+              console.warn('Error removing map:', e)
+            }
+            // Clear Leaflet's internal reference - use stored container reference
+            if ((container as any)._leaflet_id) {
+              delete (container as any)._leaflet_id
+            }
+          } else {
+            // Container is null, but try to find it via querySelector as fallback
+            // This handles the case where React unmounts the element but it still exists in DOM temporarily
+            const mapContainer = document.querySelector(`[data-session-map="${session.id}"]`) as HTMLElement
+            if (mapContainer && (mapContainer as any)._leaflet_id) {
+              delete (mapContainer as any)._leaflet_id
+            }
           }
         } catch (e) {
-          // Map might already be removed or container doesn't exist
-          console.warn('Error cleaning up map:', e)
+          // Container might not exist
+          console.warn('Error cleaning up map container:', e)
         }
         leafletMapRef.current = null
       }
+      mapInitializingRef.current = false // Reset initialization flag
       setMapLoaded(false)
     }
-  }, [isExpanded, uniqueRuns, mapLoaded, routeData, routeLoading])
-    
-    // Re-render map when route data becomes available after initial load
-    useEffect(() => {
-      if (!isExpanded || !mapLoaded || !leafletMapRef.current || !routeData || routeData.coordinates.length < 2) return
-      
-      // Import Leaflet dynamically to ensure it's available
-      const addRouteToMap = async () => {
-        try {
-          const L = (await import('leaflet')).default
-          if (!L || !leafletMapRef.current || !mapRef.current) return
-          
-          // Verify map container still exists
-          try {
-            leafletMapRef.current.getContainer()
-          } catch (e) {
-            // Map container doesn't exist, skip
-            return
-          }
-          
-          // Remove existing route if any
-          leafletMapRef.current.eachLayer((layer: any) => {
-            try {
-              if (layer.options && layer.options.color === '#3b82f6' && layer.options.weight === 3) {
-                leafletMapRef.current.removeLayer(layer)
-              }
-            } catch (e) {
-              // Layer might already be removed, continue
-            }
-          })
-          
-          // Draw the route
-          const routeCoords = routeData.coordinates.map(c => [c[1], c[0]] as [number, number])
-          const routeLine = L.polyline(routeCoords, {
-            color: '#3b82f6',
-            weight: 3,
-            opacity: 0.8,
-            smoothFactor: 1
-          }).addTo(leafletMapRef.current)
-          
-          // Recalculate bounds and fit to route
-          if (routeCoords.length > 0 && leafletMapRef.current) {
-            const bounds = L.latLngBounds(routeCoords)
-            // Use setTimeout to ensure map is fully ready
-            setTimeout(() => {
-              try {
-                if (leafletMapRef.current && mapRef.current) {
-                  leafletMapRef.current.fitBounds(bounds, { padding: [20, 20] })
-                }
-              } catch (e) {
-                console.warn('Error fitting bounds:', e)
-              }
-            }, 100)
-          }
-        } catch (err) {
-          console.warn('Error adding route to map:', err)
-        }
-      }
-      
-      addRouteToMap()
-    }, [isExpanded, mapLoaded, routeData, session.id])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // completions and skiFeatures are used inside the effect but don't need to be dependencies
+    // routeLoading is tracked via ref to avoid triggering effect on every change
+    // We only want to re-run when isExpanded or session.id changes
+  }, [isExpanded, session.id])
   
 
   // Use calculated metrics from location_history if available, otherwise use session data
@@ -456,7 +602,18 @@ function SessionCard({
       {isExpanded && (
         <div className="border-t border-white/10">
           {/* Mini map */}
-          <div ref={mapRef} className="h-48 bg-gray-900" />
+          <div className="relative h-48 bg-gray-900">
+            {!mapLoaded && mapInitializingRef.current && (
+              <div className="absolute inset-0 flex items-center justify-center bg-gray-900 z-10">
+                <div className="text-gray-400 text-sm">Loading map...</div>
+              </div>
+            )}
+            <div 
+              ref={mapRef} 
+              data-session-map={session.id} 
+              className="h-full w-full"
+            />
+          </div>
           
           {/* Run list */}
           <div className="p-4 space-y-2 max-h-64 overflow-y-auto">
