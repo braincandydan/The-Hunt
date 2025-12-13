@@ -331,8 +331,9 @@ function SessionCard({
         attributionControl: false
       })
       
-      // Add tile layer
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      // Add satellite tile layer
+      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        attribution: '© <a href="https://www.esri.com">Esri</a>, Maxar, Earthstar Geographics',
         maxZoom: 19
       }).addTo(map)
       
