@@ -5,6 +5,9 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { SkiSession, RunCompletion, SkiFeature } from '@/lib/utils/types'
+import RunDetailModal from './RunDetailModal'
+import booleanPointInPolygon from '@turf/boolean-point-in-polygon'
+import { point, polygon } from '@turf/helpers'
 
 interface SessionHistoryClientProps {
   resortSlug: string
@@ -66,6 +69,42 @@ function DifficultyBadge({ difficulty, size = 'sm' }: { difficulty?: string; siz
   )
 }
 
+// Helper function to check if a point is within resort boundary
+function isPointInResortBoundary(lat: number, lng: number, boundary: SkiFeature | null): boolean {
+  if (!boundary || !boundary.geometry) return true // If no boundary, allow all points
+  
+  try {
+    const geometry = boundary.geometry
+    
+    // Handle Polygon geometry
+    if (geometry.type === 'Polygon' && geometry.coordinates) {
+      const poly = polygon(geometry.coordinates)
+      const pt = point([lng, lat]) // GeoJSON format: [lng, lat]
+      return booleanPointInPolygon(pt, poly)
+    }
+    
+    // Handle MultiPolygon geometry
+    if (geometry.type === 'MultiPolygon' && geometry.coordinates) {
+      for (const polygonCoords of geometry.coordinates) {
+        const poly = polygon(polygonCoords)
+        const pt = point([lng, lat])
+        if (booleanPointInPolygon(pt, poly)) {
+          return true
+        }
+      }
+      return false
+    }
+    
+    // If boundary type is not supported, allow all points (fallback)
+    return true
+  } catch (error) {
+    // If there's an error checking the boundary (e.g., invalid geometry),
+    // allow the point to pass through (safer to show than hide)
+    console.warn('Error checking point in boundary:', error)
+    return true
+  }
+}
+
 // Session card component
 function SessionCard({ 
   session, 
@@ -73,7 +112,8 @@ function SessionCard({
   skiFeatures,
   isExpanded,
   onToggle,
-  resortSlug
+  resortSlug,
+  onRunClick
 }: { 
   session: SkiSession
   completions: RunCompletion[]
@@ -81,6 +121,7 @@ function SessionCard({
   isExpanded: boolean
   onToggle: () => void
   resortSlug: string
+  onRunClick: (completion: RunCompletion) => void
 }) {
   const mapRef = useRef<HTMLDivElement>(null)
   const leafletMapRef = useRef<any>(null)
@@ -93,6 +134,11 @@ function SessionCard({
   const [calculatedMetrics, setCalculatedMetrics] = useState<{ topSpeed: number; avgSpeed: number; verticalMeters: number } | null>(null)
   const supabaseRef = useRef(createClient())
   const supabase = supabaseRef.current
+  
+  // Get resort boundary
+  const resortBoundary = useMemo(() => {
+    return skiFeatures.find(f => f.type === 'boundary') || null
+  }, [skiFeatures])
   
   // Get unique runs - memoize to prevent unnecessary re-renders
   const uniqueRunIds = useMemo(() => new Set(completions.map(c => c.ski_feature_id)), [completions])
@@ -124,37 +170,57 @@ function SessionCard({
           console.warn('Error fetching location history:', error)
           setRouteData(null)
         } else if (locations && locations.length >= 2) {
-          const route: { type: 'LineString', coordinates: number[][] } = {
-            type: 'LineString' as const,
-            coordinates: locations.map(l => {
-              const coord: number[] = [l.longitude, l.latitude]
-              if (l.altitude_meters !== null && l.altitude_meters !== undefined) {
-                coord.push(l.altitude_meters)
-              }
-              return coord
-            })
-          }
+          // Filter locations to only include those within resort boundary
+          // If no boundary is defined, show all points
+          const filteredLocations = locations.filter(l => 
+            isPointInResortBoundary(l.latitude, l.longitude, resortBoundary)
+          )
           
-          // Calculate metrics from location_history
-          const speeds = locations
-            .map(l => l.speed_kmh)
-            .filter((s): s is number => s !== null && s !== undefined && s > 0)
+          // Only create route if we have at least 2 filtered points
+          // If we have filtered locations, use them. Otherwise, if no boundary is defined,
+          // use all locations (fallback behavior)
+          const locationsToUse = filteredLocations.length >= 2 
+            ? filteredLocations 
+            : (!resortBoundary ? locations : []) // Only use all locations if no boundary
           
-          const topSpeed = speeds.length > 0 ? Math.max(...speeds) : 0
-          const avgSpeed = speeds.length > 0 ? speeds.reduce((a, b) => a + b, 0) / speeds.length : 0
-          
-          // Calculate vertical meters (sum of altitude drops)
-          let verticalMeters = 0
-          for (let i = 1; i < locations.length; i++) {
-            const prev = locations[i - 1].altitude_meters
-            const curr = locations[i].altitude_meters
-            if (prev !== null && prev !== undefined && curr !== null && curr !== undefined && prev > curr) {
-              verticalMeters += prev - curr
+          if (locationsToUse.length >= 2) {
+            const route: { type: 'LineString', coordinates: number[][] } = {
+              type: 'LineString' as const,
+              coordinates: locationsToUse.map(l => {
+                const coord: number[] = [l.longitude, l.latitude]
+                if (l.altitude_meters !== null && l.altitude_meters !== undefined) {
+                  coord.push(l.altitude_meters)
+                }
+                return coord
+              })
             }
+            
+            // Calculate metrics from filtered location_history
+            const speeds = locationsToUse
+              .map(l => l.speed_kmh)
+              .filter((s): s is number => s !== null && s !== undefined && s > 0)
+            
+            const topSpeed = speeds.length > 0 ? Math.max(...speeds) : 0
+            const avgSpeed = speeds.length > 0 ? speeds.reduce((a, b) => a + b, 0) / speeds.length : 0
+            
+            // Calculate vertical meters (sum of altitude drops)
+            let verticalMeters = 0
+            for (let i = 1; i < locationsToUse.length; i++) {
+              const prev = locationsToUse[i - 1].altitude_meters
+              const curr = locationsToUse[i].altitude_meters
+              if (prev !== null && prev !== undefined && curr !== null && curr !== undefined && prev > curr) {
+                verticalMeters += prev - curr
+              }
+            }
+            
+            setCalculatedMetrics({ topSpeed, avgSpeed, verticalMeters })
+            setRouteData(route)
+          } else {
+            // Not enough points within boundary (or no boundary and no points)
+            // Still set routeData to null, but session will still show if it has completions
+            setRouteData(null)
+            setCalculatedMetrics(null)
           }
-          
-          setCalculatedMetrics({ topSpeed, avgSpeed, verticalMeters })
-          setRouteData(route)
         } else {
           setRouteData(null)
           setCalculatedMetrics(null)
@@ -168,7 +234,7 @@ function SessionCard({
     }
     
     fetchRoute()
-  }, [session.id, routeData, routeLoading, supabase])
+  }, [session.id, routeData, routeLoading, supabase, resortBoundary])
   
   // Reset route data and cleanup map when collapsed
   useEffect(() => {
@@ -351,81 +417,92 @@ function SessionCard({
           .order('recorded_at', { ascending: true })
         
         if (locations && locations.length >= 2) {
-          const MAX_TIME_GAP_MS = 5 * 60 * 1000 // 5 minutes
-          const MAX_DISTANCE_METERS = 1000 // 1km
+          // Filter locations to only include those within resort boundary
+          const filteredLocations = locations.filter(l => 
+            isPointInResortBoundary(l.latitude, l.longitude, resortBoundary)
+          )
           
-          // Split locations into segments based on time/distance gaps
-          const segments: number[][][] = []
-          let currentSegment: number[][] = []
-          
-          for (let i = 0; i < locations.length; i++) {
-            const loc = locations[i]
-            const coord = [loc.longitude, loc.latitude] as number[]
+          if (filteredLocations.length >= 2) {
+            const MAX_TIME_GAP_MS = 5 * 60 * 1000 // 5 minutes
+            const MAX_DISTANCE_METERS = 1000 // 1km
             
-            if (i === 0) {
-              // First point always starts a segment
-              currentSegment.push(coord)
-            } else {
-              const prevLoc = locations[i - 1]
-              const timeDiff = new Date(loc.recorded_at).getTime() - new Date(prevLoc.recorded_at).getTime()
-              const distance = haversineDistance(
-                prevLoc.latitude,
-                prevLoc.longitude,
-                loc.latitude,
-                loc.longitude
-              )
-              
-              // If gap is too large, start a new segment
-              if (timeDiff > MAX_TIME_GAP_MS || distance > MAX_DISTANCE_METERS) {
-                // Save current segment if it has at least 2 points
-                if (currentSegment.length >= 2) {
-                  segments.push(currentSegment)
-                }
-                // Start new segment
-                currentSegment = [coord]
-              } else {
-                // Continue current segment
+            // Split locations into segments based on time/distance gaps
+            const segments: number[][][] = []
+            let currentSegment: number[][] = []
+            
+            for (let i = 0; i < filteredLocations.length; i++) {
+              const loc = filteredLocations[i]
+              const coord = [loc.longitude, loc.latitude] as number[]
+            
+              if (i === 0) {
+                // First point always starts a segment
                 currentSegment.push(coord)
-              }
-            }
-          }
-          
-          // Add the last segment if it has at least 2 points
-          if (currentSegment.length >= 2) {
-            segments.push(currentSegment)
-          }
-          
-          // Store segments for bounds calculation
-          routeSegments = segments
-          
-          // Recalculate bounds from segments
-          if (segments.length > 0) {
-            bounds = null
-            for (const segment of segments) {
-              for (const coord of segment) {
-                const lat = coord[1]
-                const lng = coord[0]
-                if (!bounds) {
-                  bounds = [[lat, lng], [lat, lng]]
+              } else {
+                const prevLoc = filteredLocations[i - 1]
+                const timeDiff = new Date(loc.recorded_at).getTime() - new Date(prevLoc.recorded_at).getTime()
+                const distance = haversineDistance(
+                  prevLoc.latitude,
+                  prevLoc.longitude,
+                  loc.latitude,
+                  loc.longitude
+                )
+                
+                // If gap is too large, start a new segment
+                if (timeDiff > MAX_TIME_GAP_MS || distance > MAX_DISTANCE_METERS) {
+                  // Save current segment if it has at least 2 points
+                  if (currentSegment.length >= 2) {
+                    segments.push(currentSegment)
+                  }
+                  // Start new segment
+                  currentSegment = [coord]
                 } else {
-                  bounds[0][0] = Math.min(bounds[0][0], lat)
-                  bounds[0][1] = Math.min(bounds[0][1], lng)
-                  bounds[1][0] = Math.max(bounds[1][0], lat)
-                  bounds[1][1] = Math.max(bounds[1][1], lng)
+                  // Continue current segment
+                  currentSegment.push(coord)
                 }
               }
             }
-          }
+            
+            // Add the last segment if it has at least 2 points
+            if (currentSegment.length >= 2) {
+              segments.push(currentSegment)
+            }
           
-          // Draw each segment as a separate polyline
-          for (const segment of segments) {
-            const segmentCoords = segment.map(c => [c[1], c[0]] as [number, number])
-            L.polyline(segmentCoords, {
-              color: '#3b82f6',
-              weight: 3,
-              opacity: 0.8,
-              smoothFactor: 1
-            }).addTo(map)
+            // Store segments for bounds calculation
+            routeSegments = segments
+            
+            // Recalculate bounds from segments
+            if (segments.length > 0) {
+              bounds = null
+              for (const segment of segments) {
+                for (const coord of segment) {
+                  const lat = coord[1]
+                  const lng = coord[0]
+                  if (!bounds) {
+                    bounds = [[lat, lng], [lat, lng]]
+                  } else {
+                    bounds[0][0] = Math.min(bounds[0][0], lat)
+                    bounds[0][1] = Math.min(bounds[0][1], lng)
+                    bounds[1][0] = Math.max(bounds[1][0], lat)
+                    bounds[1][1] = Math.max(bounds[1][1], lng)
+                  }
+                }
+              }
+            }
+            
+            // Draw each segment as a separate polyline
+            // Use purple color if there are no run completions (tracked route without associated trail)
+            // Use blue color if there are run completions (tracked route with associated trails)
+            const routeColor = completions.length === 0 ? '#a855f7' : '#3b82f6' // Purple for unassociated routes, blue for associated
+            
+            for (const segment of segments) {
+              const segmentCoords = segment.map(c => [c[1], c[0]] as [number, number])
+              L.polyline(segmentCoords, {
+                color: routeColor,
+                weight: 3,
+                opacity: 0.8,
+                smoothFactor: 1
+              }).addTo(map)
+            }
           }
         }
       }
@@ -521,9 +598,119 @@ function SessionCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // completions and skiFeatures are used inside the effect but don't need to be dependencies
     // routeLoading is tracked via ref to avoid triggering effect on every change
-    // We only want to re-run when isExpanded or session.id changes
-  }, [isExpanded, session.id])
+    // routeData is included so map redraws when route data becomes available
+    // We only want to re-run when isExpanded, session.id, routeData, or resortBoundary changes
+  }, [isExpanded, session.id, routeData, resortBoundary])
   
+  // Separate effect to draw route when routeData becomes available after map is loaded
+  useEffect(() => {
+    if (!isExpanded || !mapLoaded || !leafletMapRef.current || !routeData || routeData.coordinates.length < 2) {
+      return
+    }
+    
+    const drawRoute = async () => {
+      const L = (await import('leaflet')).default
+      const { haversineDistance } = await import('@/lib/utils/run-tracking')
+      const map = leafletMapRef.current
+      
+      if (!map) return
+      
+      // Get the original locations with timestamps to detect gaps
+      const { data: locations } = await supabase
+        .from('location_history')
+        .select('latitude, longitude, recorded_at')
+        .eq('session_id', session.id)
+        .order('recorded_at', { ascending: true })
+      
+      if (locations && locations.length >= 2) {
+        // Filter locations to only include those within resort boundary
+        const filteredLocations = locations.filter(l => 
+          isPointInResortBoundary(l.latitude, l.longitude, resortBoundary)
+        )
+        
+        if (filteredLocations.length >= 2) {
+          const MAX_TIME_GAP_MS = 5 * 60 * 1000 // 5 minutes
+          const MAX_DISTANCE_METERS = 1000 // 1km
+          
+          // Split locations into segments based on time/distance gaps
+          const segments: number[][][] = []
+          let currentSegment: number[][] = []
+          
+          for (let i = 0; i < filteredLocations.length; i++) {
+            const loc = filteredLocations[i]
+            const coord = [loc.longitude, loc.latitude] as number[]
+          
+            if (i === 0) {
+              currentSegment.push(coord)
+            } else {
+              const prevLoc = filteredLocations[i - 1]
+              const timeDiff = new Date(loc.recorded_at).getTime() - new Date(prevLoc.recorded_at).getTime()
+              const distance = haversineDistance(
+                prevLoc.latitude,
+                prevLoc.longitude,
+                loc.latitude,
+                loc.longitude
+              )
+              
+              if (timeDiff > MAX_TIME_GAP_MS || distance > MAX_DISTANCE_METERS) {
+                if (currentSegment.length >= 2) {
+                  segments.push(currentSegment)
+                }
+                currentSegment = [coord]
+              } else {
+                currentSegment.push(coord)
+              }
+            }
+          }
+          
+          if (currentSegment.length >= 2) {
+            segments.push(currentSegment)
+          }
+          
+          // Draw each segment as a separate polyline
+          const routeColor = completions.length === 0 ? '#a855f7' : '#3b82f6'
+          
+          for (const segment of segments) {
+            const segmentCoords = segment.map(c => [c[1], c[0]] as [number, number])
+            L.polyline(segmentCoords, {
+              color: routeColor,
+              weight: 3,
+              opacity: 0.8,
+              smoothFactor: 1
+            }).addTo(map)
+          }
+          
+          // Fit bounds to show the route
+          if (segments.length > 0) {
+            let routeBounds: [[number, number], [number, number]] | null = null
+            for (const segment of segments) {
+              for (const coord of segment) {
+                const lat = coord[1]
+                const lng = coord[0]
+                if (!routeBounds) {
+                  routeBounds = [[lat, lng], [lat, lng]]
+                } else {
+                  routeBounds[0][0] = Math.min(routeBounds[0][0], lat)
+                  routeBounds[0][1] = Math.min(routeBounds[0][1], lng)
+                  routeBounds[1][0] = Math.max(routeBounds[1][0], lat)
+                  routeBounds[1][1] = Math.max(routeBounds[1][1], lng)
+                }
+              }
+            }
+            if (routeBounds) {
+              setTimeout(() => {
+                if (map) {
+                  map.fitBounds(routeBounds!, { padding: [20, 20] })
+                }
+              }, 100)
+            }
+          }
+        }
+      }
+    }
+    
+    drawRoute().catch(console.error)
+  }, [isExpanded, mapLoaded, routeData, session.id, completions.length, resortBoundary, supabase])
 
   // Use calculated metrics from location_history if available, otherwise use session data
   const topSpeed = calculatedMetrics?.topSpeed || session.top_speed_kmh || 0
@@ -543,7 +730,18 @@ function SessionCard({
               {formatDate(session.session_date)}
             </div>
             <div className="text-sm text-gray-400">
-              {completions.length} runs • {uniqueRunIds.size} unique
+              {completions.length > 0 ? (
+                <>
+                  {completions.length} runs • {uniqueRunIds.size} unique
+                </>
+              ) : routeData && routeData.coordinates.length > 0 ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 bg-purple-500 rounded-full"></span>
+                  Tracked route (no runs)
+                </span>
+              ) : (
+                'No tracked data'
+              )}
             </div>
           </div>
         </div>
@@ -624,9 +822,10 @@ function SessionCard({
             {completions.map((completion, i) => {
               const feature = skiFeatures.find(f => f.id === completion.ski_feature_id)
               return (
-                <div 
+                <button
                   key={completion.id}
-                  className="flex items-center gap-3 py-2 px-3 bg-white/5 rounded-lg"
+                  onClick={() => onRunClick(completion)}
+                  className="w-full flex items-center gap-3 py-2 px-3 bg-white/5 rounded-lg hover:bg-white/10 transition-colors text-left"
                 >
                   <span className="text-gray-500 text-sm w-6">{i + 1}.</span>
                   <DifficultyBadge difficulty={feature?.difficulty ?? undefined} />
@@ -643,7 +842,10 @@ function SessionCard({
                       {Math.floor(completion.duration_seconds / 60)}:{String(completion.duration_seconds % 60).padStart(2, '0')}
                     </span>
                   )}
-                </div>
+                  <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </button>
               )
             })}
             
@@ -651,9 +853,15 @@ function SessionCard({
               <div className="text-center py-8 text-gray-400">
                 <p>No runs recorded for this session</p>
                 {routeData && routeData.coordinates.length > 0 && (
-                  <p className="text-xs mt-2 text-gray-500">
-                    GPS route is shown on the map above
-                  </p>
+                  <div className="mt-2 space-y-1">
+                    <p className="text-xs text-gray-500">
+                      GPS route is shown on the map above
+                    </p>
+                    <p className="text-xs text-purple-400 flex items-center justify-center gap-1">
+                      <span className="w-2 h-2 bg-purple-500 rounded-full"></span>
+                      Tracked route (not associated with a trail)
+                    </p>
+                  </div>
                 )}
               </div>
             )}
@@ -676,6 +884,7 @@ export default function SessionHistoryClient({
   const [expandedSession, setExpandedSession] = useState<string | null>(
     sessions.length > 0 ? sessions[0].id : null
   )
+  const [selectedRun, setSelectedRun] = useState<RunCompletion | null>(null)
   
   const handleRefresh = () => {
     // Clean up all maps before refreshing
@@ -798,11 +1007,21 @@ export default function SessionHistoryClient({
                   expandedSession === session.id ? null : session.id
                 )}
                 resortSlug={resortSlug}
+                onRunClick={setSelectedRun}
               />
             ))
           )}
         </div>
       </main>
+      
+      {/* Run Detail Modal */}
+      {selectedRun && (
+        <RunDetailModal
+          completion={selectedRun}
+          skiFeature={skiFeatures.find(f => f.id === selectedRun.ski_feature_id)}
+          onClose={() => setSelectedRun(null)}
+        />
+      )}
     </div>
   )
 }

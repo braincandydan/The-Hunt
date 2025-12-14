@@ -17,7 +17,7 @@ export default function ProgressBar({ foundCount, totalCount, speedData }: Progr
 
   return (
     <div className="fixed top-0 left-0 right-0 z-[1001] bg-white/95 backdrop-blur-sm border-b border-gray-200 shadow-sm">
-      <div className="px-4 py-3 max-w-7xl mx-auto safe-area-top">
+      <div className="px-4 py-4 max-w-7xl mx-auto ">
         <div className="flex flex-row items-center justify-between gap-4">
           {/* Progress Section - Left */}
           <div className="flex-1 min-w-0">
