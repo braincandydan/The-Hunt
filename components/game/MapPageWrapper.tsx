@@ -21,6 +21,13 @@ interface MapPageWrapperProps {
   signs: Sign[]
   discoveredSignIds: Set<string>
   skiFeatures: SkiFeature[]
+  sessionId?: string
+  sessionData?: {
+    session: any
+    completions: any[]
+    descentSessions: any[]
+    completionsByDescentSession: Record<string, any[]>
+  } | null
 }
 
 export default function MapPageWrapper({
@@ -29,6 +36,8 @@ export default function MapPageWrapper({
   signs,
   discoveredSignIds,
   skiFeatures,
+  sessionId,
+  sessionData,
 }: MapPageWrapperProps) {
   // DEBUG: Track component renders
   const renderCountRef = useRef(0)
@@ -203,7 +212,7 @@ export default function MapPageWrapper({
       {/* Map wrapped in error boundary for graceful error handling */}
       <ErrorBoundary fallback={map3DErrorFallback}>
         <MapView
-          key={`map-${resortSlug}`}
+          key={`map-${resortSlug}${sessionId ? `-${sessionId}` : ''}`}
           resortSlug={resortSlug}
           signs={signs}
           discoveredSignIds={discoveredSignIds}
@@ -222,36 +231,43 @@ export default function MapPageWrapper({
             '/3d-map/geojson/SkiRunBackground.geojson',
           ]}
           proximityThreshold={30}
+          sessionId={sessionId}
+          sessionData={sessionData}
         />
       </ErrorBoundary>
 
-      {/* Progress Bar */}
-      <ProgressBar foundCount={foundCount} totalCount={totalCount} speedData={speedData} />
+      {/* Progress Bar - hidden when viewing a session */}
+      {!sessionId && (
+        <ProgressBar foundCount={foundCount} totalCount={totalCount} speedData={speedData} />
+      )}
 
+      {/* Side Menu - hidden when viewing a session */}
+      {!sessionId && (
+        <SideMenu
+          resort={resort}
+          isOpen={menuOpen}
+          onClose={() => setMenuOpen(false)}
+        />
+      )}
 
-      {/* Side Menu */}
-      <SideMenu
-        resort={resort}
-        isOpen={menuOpen}
-        onClose={() => setMenuOpen(false)}
-      />
+      {/* Bottom Sheet - hidden when viewing a session */}
+      {!sessionId && (
+        <SignsBottomSheet
+          signs={signs}
+          discoveredSignIds={discoveredSignIds}
+          isOpen={bottomSheetOpen}
+          onClose={() => {
+            setBottomSheetOpen(false)
+            if (typeof window !== 'undefined') {
+              document.body.style.overflow = ''
+            }
+          }}
+          onSignClick={handleSignClick}
+        />
+      )}
 
-      {/* Bottom Sheet */}
-      <SignsBottomSheet
-        signs={signs}
-        discoveredSignIds={discoveredSignIds}
-        isOpen={bottomSheetOpen}
-        onClose={() => {
-          setBottomSheetOpen(false)
-          if (typeof window !== 'undefined') {
-            document.body.style.overflow = ''
-          }
-        }}
-        onSignClick={handleSignClick}
-      />
-
-      {/* Session Summary - shows when tracking and not showing bottom sheet */}
-      {isLocationTracking && !bottomSheetOpen && (
+      {/* Session Summary - shows when tracking and not showing bottom sheet, hidden when viewing a session */}
+      {!sessionId && isLocationTracking && !bottomSheetOpen && (
         <div className="fixed bottom-16 left-4 right-4 z-[1000]">
           <SessionSummary
             totalRuns={runTracking.todayStats.totalRuns}
@@ -268,21 +284,23 @@ export default function MapPageWrapper({
         </div>
       )}
 
-      {/* Mobile Bottom Menu */}
-      <MobileBottomMenu
-        resortSlug={resortSlug}
-        foundCount={foundCount}
-        totalCount={totalCount}
-        isTrackingLocation={isLocationTracking}
-        onToggleLocationTracking={() => {
-          // Create a ref to access MapView's toggle function
-          // For now, we'll manage state here and MapView will sync
-          setIsLocationTracking(!isLocationTracking)
-        }}
-        onOpenSignsSheet={() => setBottomSheetOpen(true)}
-        onOpenMenu={() => setMenuOpen(true)}
-        bottomSheetOpen={bottomSheetOpen}
-      />
+      {/* Mobile Bottom Menu - hidden when viewing a session */}
+      {!sessionId && (
+        <MobileBottomMenu
+          resortSlug={resortSlug}
+          foundCount={foundCount}
+          totalCount={totalCount}
+          isTrackingLocation={isLocationTracking}
+          onToggleLocationTracking={() => {
+            // Create a ref to access MapView's toggle function
+            // For now, we'll manage state here and MapView will sync
+            setIsLocationTracking(!isLocationTracking)
+          }}
+          onOpenSignsSheet={() => setBottomSheetOpen(true)}
+          onOpenMenu={() => setMenuOpen(true)}
+          bottomSheetOpen={bottomSheetOpen}
+        />
+      )}
 
       {/* Sign Detail Modal */}
       <SignDetailModal

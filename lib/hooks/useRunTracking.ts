@@ -345,14 +345,36 @@ export function useRunTracking({
     
     // Check if we should start/end descent session
     if (trackerRef.current && altitude !== undefined && speed !== undefined) {
-      const isDescending = trackerRef.current.isDescending(altitude, speed)
+      const isDescending = trackerRef.current.isDescending(lat, lng, altitude, speed)
       const shouldEnd = trackerRef.current.shouldEndDescent(speed)
+      const isNearLift = trackerRef.current.isNearLift(lat, lng)
+      const isAscending = trackerRef.current.isAscending(altitude)
       
-      if (isDescending && !descentSessionIdRef.current) {
-        // Start descent session
+      // End descent session if user is on a lift or ascending
+      if ((isNearLift || isAscending) && descentSessionIdRef.current) {
+        const supabase = supabaseRef.current
+        const descentId = descentSessionIdRef.current
+        const userId = userIdRef.current!
+        
+        void (async () => {
+          try {
+            await supabase.rpc('end_descent_session', {
+              p_descent_id: descentId,
+              p_user_id: userId
+            })
+            descentSessionIdRef.current = null
+            if (trackerRef.current) {
+              trackerRef.current.setDescentSessionId(null)
+            }
+          } catch (err: unknown) {
+            console.warn('Failed to end descent session:', err)
+          }
+        })()
+      } else if (isDescending && !descentSessionIdRef.current) {
+        // Start descent session only if actually descending
         getOrCreateDescentSession()
       } else if (shouldEnd && descentSessionIdRef.current) {
-        // End descent session
+        // End descent session if user stopped moving
         const supabase = supabaseRef.current
         const descentId = descentSessionIdRef.current
         const userId = userIdRef.current!

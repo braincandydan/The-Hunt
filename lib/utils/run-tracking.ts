@@ -170,13 +170,20 @@ export class RunTracker {
   private readonly DESCENT_SPEED_THRESHOLD = 5 // km/h - minimum speed to be considered moving
   private readonly DESCENT_STOP_DURATION = 10000 // 10 seconds of low/no speed to end descent
   
+  private allFeatures: SkiFeature[] = [] // Store all features including lifts
+  private liftFeatures: SkiFeature[] = [] // Store only lift features for checking
+  
   constructor(features: SkiFeature[], options?: {
     proximityThreshold?: number
     completionThreshold?: number
     gracePeriodDuration?: number // milliseconds
   }) {
-    // Only track trails (not lifts, boundaries, etc.)
+    // Store all features for lift checking
+    this.allFeatures = features
+    // Only track trails (not lifts, boundaries, etc.) for run tracking
     this.features = features.filter(f => f.type === 'trail')
+    // Store lift features separately for descent detection
+    this.liftFeatures = features.filter(f => f.type === 'lift')
     if (options?.proximityThreshold) this.proximityThreshold = options.proximityThreshold
     if (options?.completionThreshold) this.completionThreshold = options.completionThreshold
     if (options?.gracePeriodDuration) this.gracePeriodDuration = options.gracePeriodDuration
@@ -478,10 +485,43 @@ export class RunTracker {
   }
   
   /**
-   * Check if user is descending (moving down the mountain)
+   * Check if user is near or on a lift
    */
-  isDescending(altitude?: number, speed?: number): boolean {
+  isNearLift(lat: number, lng: number): boolean {
+    for (const lift of this.liftFeatures) {
+      const result = findClosestPointOnRun(lat, lng, lift)
+      if (result && result.distance <= this.proximityThreshold * 2) { // Use 2x threshold for lifts (60m)
+        return true
+      }
+    }
+    return false
+  }
+  
+  /**
+   * Check if user is ascending (gaining altitude)
+   */
+  isAscending(altitude?: number): boolean {
+    if (altitude === undefined || this.lastAltitude === null) return false
+    // If altitude is increasing, user is ascending
+    return altitude > this.lastAltitude
+  }
+  
+  /**
+   * Check if user is descending (moving down the mountain)
+   * Returns false if user is on a lift or ascending
+   */
+  isDescending(lat: number, lng: number, altitude?: number, speed?: number): boolean {
     if (altitude === undefined || speed === undefined) return false
+    
+    // Don't create descent if user is near/on a lift
+    if (this.isNearLift(lat, lng)) {
+      return false
+    }
+    
+    // Don't create descent if user is ascending (gaining altitude)
+    if (this.isAscending(altitude)) {
+      return false
+    }
     
     // Must be moving at reasonable speed
     if (speed < this.DESCENT_SPEED_THRESHOLD) return false

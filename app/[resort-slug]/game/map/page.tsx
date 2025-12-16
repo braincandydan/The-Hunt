@@ -6,10 +6,13 @@ import { autoJoinResortIfNeeded } from '@/lib/utils/auto-join-resort'
 
 export default async function MapPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ 'resort-slug': string }>
+  searchParams: Promise<{ sessionId?: string }>
 }) {
   const resolvedParams = await params
+  const resolvedSearchParams = await searchParams
   const supabase = await createClient()
   
   // Parallel fetch: user auth and resort data (independent queries)
@@ -63,6 +66,52 @@ export default async function MapPage({
 
   const discoveredSignIds = new Set(discoveries?.map((d) => d.sign_id) || [])
 
+  // Fetch session data if sessionId is provided
+  let sessionData = null
+  if (resolvedSearchParams.sessionId) {
+    const [sessionResult, completionsResult, descentSessionsResult] = await Promise.all([
+      supabase
+        .from('ski_sessions')
+        .select('*')
+        .eq('id', resolvedSearchParams.sessionId)
+        .eq('user_id', user.id)
+        .maybeSingle(),
+      supabase
+        .from('run_completions')
+        .select('*, ski_feature:ski_features(*)')
+        .eq('session_id', resolvedSearchParams.sessionId)
+        .order('completed_at', { ascending: true }),
+      supabase
+        .from('descent_sessions')
+        .select('*')
+        .eq('session_id', resolvedSearchParams.sessionId)
+        .order('started_at', { ascending: true })
+    ])
+
+    if (sessionResult.data) {
+      const completions = completionsResult.data || []
+      const descentSessions = descentSessionsResult.data || []
+      
+      // Group completions by descent session
+      const completionsByDescentSession: Record<string, any[]> = {}
+      for (const completion of completions) {
+        if (completion.descent_session_id) {
+          if (!completionsByDescentSession[completion.descent_session_id]) {
+            completionsByDescentSession[completion.descent_session_id] = []
+          }
+          completionsByDescentSession[completion.descent_session_id].push(completion)
+        }
+      }
+
+      sessionData = {
+        session: sessionResult.data,
+        completions,
+        descentSessions,
+        completionsByDescentSession
+      }
+    }
+  }
+
   return (
     <MapPageWrapper
       resortSlug={resolvedParams['resort-slug']}
@@ -70,6 +119,8 @@ export default async function MapPage({
       signs={(signs || []) as Sign[]}
       discoveredSignIds={discoveredSignIds}
       skiFeatures={(skiFeatures || []) as SkiFeature[]}
+      sessionId={resolvedSearchParams.sessionId || undefined}
+      sessionData={sessionData}
     />
   )
 }

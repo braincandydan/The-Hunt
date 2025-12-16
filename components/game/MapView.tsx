@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import dynamic from 'next/dynamic'
 import { Sign, GeoJSONGeometry } from '@/lib/utils/types'
+import SessionView from './SessionView'
 
 // Dynamic import of MapView3D to avoid loading Three.js (~40MB) until 3D mode is used
 const MapView3D = dynamic(() => import('./MapView3D'), {
@@ -46,9 +47,17 @@ interface MapViewProps {
   // Optional: Show proximity zones around trails for tracking
   showProximityZones?: boolean
   proximityThreshold?: number // meters - default 30
+  // Optional: Session data for viewing historical sessions
+  sessionId?: string
+  sessionData?: {
+    session: any
+    completions: any[]
+    descentSessions: any[]
+    completionsByDescentSession: Record<string, any[]>
+  } | null
 }
 
-export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatures = [], resortName = 'Resort', onSpeedUpdate, onLocationUpdate, isLocationTracking: externalIsTracking, onToggleLocationTracking, scene3DUrl, scene3DCenter, additionalGeoJSONPaths, showProximityZones = false, proximityThreshold = 30 }: MapViewProps) {
+export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatures = [], resortName = 'Resort', onSpeedUpdate, onLocationUpdate, isLocationTracking: externalIsTracking, onToggleLocationTracking, scene3DUrl, scene3DCenter, additionalGeoJSONPaths, showProximityZones = false, proximityThreshold = 30, sessionId, sessionData }: MapViewProps) {
   // DEBUG: Track component renders
   const renderCountRef = useRef(0)
   renderCountRef.current++
@@ -75,8 +84,9 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   const [leafletLoaded, setLeafletLoaded] = useState(false)
   const MIN_ZOOM_FOR_LABELS = 15 // Only show labels when zoomed in enough
   // Use external state if provided, otherwise use internal state
+  // When viewing a session, disable location tracking
   const [internalIsTrackingLocation, setInternalIsTrackingLocation] = useState(false)
-  const isTrackingLocation = externalIsTracking !== undefined ? externalIsTracking : internalIsTrackingLocation
+  const isTrackingLocation = sessionId ? false : (externalIsTracking !== undefined ? externalIsTracking : internalIsTrackingLocation)
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null) // Store user's current location
   const [userSpeed, setUserSpeed] = useState<number | null>(null) // Store user's current speed in km/h
   const [topSpeed, setTopSpeed] = useState<number>(0) // Store top speed in km/h
@@ -1310,7 +1320,12 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     proximityZonesRef.current = []
 
     // Create buffer zones for each trail
-    skiFeatures.forEach((feature) => {
+    // Skip drawing trails when viewing a session - SessionView handles trail rendering
+    const featuresToDraw = sessionId 
+      ? skiFeatures.filter(f => f.type !== 'trail')
+      : skiFeatures
+    
+    featuresToDraw.forEach((feature) => {
       if (feature.type !== 'trail') return // Only show proximity zones for trails
       
       try {
@@ -1490,7 +1505,12 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
       )
       
       // Extend bounds to include ski features
-      skiFeatures.forEach((feature) => {
+      // Skip drawing trails when viewing a session - SessionView handles trail rendering
+    const featuresToDraw = sessionId 
+      ? skiFeatures.filter(f => f.type !== 'trail')
+      : skiFeatures
+    
+    featuresToDraw.forEach((feature) => {
         try {
           const geoJson = L.geoJSON(feature.geometry)
           geoJson.eachLayer((layer: any) => {
@@ -1531,7 +1551,12 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     // Load textpath plugin for trail labels (lazy load)
     await loadTextpathPlugin()
     
-    skiFeatures.forEach((feature, index) => {
+    // Skip drawing trails when viewing a session - SessionView handles trail rendering
+    const featuresToDraw = sessionId 
+      ? skiFeatures.filter(f => f.type !== 'trail')
+      : skiFeatures
+    
+    featuresToDraw.forEach((feature, index) => {
       try {
         // Validate geometry
         if (!feature.geometry || !feature.geometry.type || !feature.geometry.coordinates) {
@@ -1855,6 +1880,16 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     <div className="relative w-full h-full">
       {/* Fullscreen Map */}
       <div ref={mapContainer} className="w-full h-full" />
+      
+      {/* Session View - shows when viewing a historical session */}
+      {sessionId && sessionData && map.current && leafletLoaded && (
+        <SessionView
+          sessionId={sessionId}
+          sessionData={sessionData}
+          skiFeatures={skiFeatures}
+          map={map.current}
+        />
+      )}
       
       {/* Proximity Zones Toggle Button */}
       <button
