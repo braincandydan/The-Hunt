@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import dynamic from 'next/dynamic'
 import { Sign, GeoJSONGeometry } from '@/lib/utils/types'
 
@@ -43,9 +43,12 @@ interface MapViewProps {
   scene3DCenter?: [number, number] // [lat, lng]
   // Optional: Paths to additional GeoJSON files from QGIS exports
   additionalGeoJSONPaths?: string[] // e.g., ['/3d-map/geojson/tree-line.json', '/3d-map/geojson/runs.json']
+  // Optional: Show proximity zones around trails for tracking
+  showProximityZones?: boolean
+  proximityThreshold?: number // meters - default 30
 }
 
-export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatures = [], resortName = 'Resort', onSpeedUpdate, onLocationUpdate, isLocationTracking: externalIsTracking, onToggleLocationTracking, scene3DUrl, scene3DCenter, additionalGeoJSONPaths }: MapViewProps) {
+export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatures = [], resortName = 'Resort', onSpeedUpdate, onLocationUpdate, isLocationTracking: externalIsTracking, onToggleLocationTracking, scene3DUrl, scene3DCenter, additionalGeoJSONPaths, showProximityZones = false, proximityThreshold = 30 }: MapViewProps) {
   // DEBUG: Track component renders
   const renderCountRef = useRef(0)
   renderCountRef.current++
@@ -54,6 +57,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   }
   
   const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d') // Toggle between 2D and 3D-Three.js
+  const [showZones, setShowZones] = useState(showProximityZones) // Internal state for proximity zones
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<any>(null) // Use any to avoid type issues before Leaflet loads
   const markersRef = useRef<any[]>([])
@@ -65,6 +69,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
   const snowOverlayRef = useRef<any>(null) // Store the snow texture overlay
   const tileLayersRef = useRef<any[]>([]) // Store tile layers so we can update their bounds
   const layerControlRef = useRef<any>(null) // Store the layer control so we can update it
+  const proximityZonesRef = useRef<any[]>([]) // Store proximity zone layers
   const [currentZoom, setCurrentZoom] = useState(13) // Track zoom level
   const [activeBaseLayer, setActiveBaseLayer] = useState<'satellite'>('satellite') // Track active base layer - only satellite available
   const [leafletLoaded, setLeafletLoaded] = useState(false)
@@ -437,6 +442,8 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
           labelsRef.current = []
           arrowsRef.current.forEach((arrow) => map.current?.removeLayer(arrow))
           arrowsRef.current = []
+          proximityZonesRef.current.forEach((zone) => map.current?.removeLayer(zone))
+          proximityZonesRef.current = []
           if (maskOverlayRef.current && map.current?.hasLayer(maskOverlayRef.current)) {
             map.current.removeLayer(maskOverlayRef.current)
           }
@@ -1266,6 +1273,78 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     }
   }
 
+  // Add proximity zones around trails
+  const addProximityZones = useCallback(async () => {
+    if (!map.current || skiFeatures.length === 0 || typeof window === 'undefined' || !showZones) return
+    const L = (window as any).L
+    if (!L) return
+
+    // Dynamically import turf buffer
+    let buffer: any
+    try {
+      const turf = await import('@turf/turf')
+      // Try different import patterns
+      buffer = turf.buffer || turf.default?.buffer || (turf as any).buffer
+      if (!buffer && typeof turf === 'object' && 'buffer' in turf) {
+        buffer = (turf as any).buffer
+      }
+      if (!buffer) {
+        console.warn('Turf buffer not available, proximity zones will not be shown')
+        return
+      }
+    } catch (err) {
+      console.warn('Failed to load turf buffer:', err)
+      return
+    }
+
+    // Remove existing proximity zones
+    proximityZonesRef.current.forEach((layer) => {
+      try {
+        if (map.current?.hasLayer(layer)) {
+          map.current.removeLayer(layer)
+        }
+      } catch (e) {
+        // Ignore errors
+      }
+    })
+    proximityZonesRef.current = []
+
+    // Create buffer zones for each trail
+    skiFeatures.forEach((feature) => {
+      if (feature.type !== 'trail') return // Only show proximity zones for trails
+      
+      try {
+        // Create a GeoJSON feature from the geometry
+        const geoJsonFeature: GeoJSON.Feature = {
+          type: 'Feature',
+          geometry: feature.geometry,
+          properties: {},
+        }
+
+        // Create buffer around the trail (buffer distance in meters)
+        const buffered = buffer(geoJsonFeature, proximityThreshold, { units: 'meters' })
+        
+        // Create Leaflet layer from buffered polygon
+        const bufferLayer = L.geoJSON(buffered as any, {
+          style: {
+            color: '#fbbf24', // Amber/yellow color
+            weight: 2,
+            opacity: 0.6,
+            fillColor: '#fef3c7', // Light amber fill
+            fillOpacity: 0.2,
+            dashArray: '5, 5',
+          },
+          interactive: false,
+        })
+
+        bufferLayer.addTo(map.current)
+        proximityZonesRef.current.push(bufferLayer)
+      } catch (err) {
+        console.warn(`Failed to create proximity zone for trail ${feature.name}:`, err)
+      }
+    })
+  }, [skiFeatures, showZones, proximityThreshold])
+
   useEffect(() => {
     if (map.current && skiFeatures.length > 0) {
       // Update ski features when they change
@@ -1321,12 +1400,42 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
         arrowsRef.current = []
       }
       addSkiFeatures()
+      // Add proximity zones if enabled
+      if (showZones) {
+        addProximityZones()
+      }
       // Update label visibility based on current zoom
       if (map.current) {
         updateLabelVisibility(map.current.getZoom())
       }
     }
-  }, [skiFeatures, currentZoom])
+  }, [skiFeatures, currentZoom, showZones, proximityThreshold, addProximityZones])
+
+  // Sync internal state with prop
+  useEffect(() => {
+    setShowZones(showProximityZones)
+  }, [showProximityZones])
+
+  // Update proximity zones when visibility changes
+  useEffect(() => {
+    if (!map.current || !leafletLoaded) return
+    
+    if (showZones) {
+      addProximityZones()
+    } else {
+      // Remove proximity zones
+      proximityZonesRef.current.forEach((layer) => {
+        try {
+          if (map.current?.hasLayer(layer)) {
+            map.current.removeLayer(layer)
+          }
+        } catch (e) {
+          // Ignore errors
+        }
+      })
+      proximityZonesRef.current = []
+    }
+  }, [showZones, proximityThreshold, leafletLoaded, addProximityZones])
 
   const addMarkers = () => {
     if (!map.current || typeof window === 'undefined') return
@@ -1715,6 +1824,8 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
           sceneUrl={scene3DUrl}
           center={scene3DCenter}
           additionalGeoJSONPaths={additionalGeoJSONPaths}
+          showProximityZones={showZones}
+          proximityThreshold={proximityThreshold}
         />
         
         {/* Toggle Button - 3D to 2D */}
@@ -1744,6 +1855,21 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     <div className="relative w-full h-full">
       {/* Fullscreen Map */}
       <div ref={mapContainer} className="w-full h-full" />
+      
+      {/* Proximity Zones Toggle Button */}
+      <button
+        onClick={() => setShowZones(!showZones)}
+        className={`fixed top-[88px] right-4 z-[1002] bg-white rounded-full p-3 shadow-lg hover:shadow-xl transition-all hover:scale-105 touch-manipulation border-2 ${
+          showZones ? 'text-amber-600 border-amber-500 bg-amber-50' : 'text-gray-700 border-gray-300'
+        }`}
+        aria-label={showZones ? 'Hide proximity zones' : 'Show proximity zones'}
+        title={showZones ? `Hide proximity zones (${proximityThreshold}m radius)` : `Show proximity zones (${proximityThreshold}m radius)`}
+      >
+        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+        </svg>
+      </button>
       
 
 

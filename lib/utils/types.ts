@@ -142,16 +142,57 @@ export interface RunCompletion {
   id: string
   session_id: string
   user_id: string
-  ski_feature_id: string
+  ski_feature_id: string | null // Nullable for off-trail segments
   started_at: string
   completed_at: string
   duration_seconds?: number | null
   top_speed_kmh?: number | null
   avg_speed_kmh?: number | null
   gps_track?: GeoJSONLineString | null
-  detection_method: 'gps_proximity' | 'manual' | 'qr_scan'
+  detection_method: 'gps_proximity' | 'manual' | 'qr_scan' | 'retroactive_detection'
+  // Descent session fields
+  descent_session_id?: string | null
+  segment_type?: 'on_trail' | 'off_trail'
+  sequence_order?: number | null
+  associated_run_id?: string | null
+  completion_percentage?: number | null // Percentage of run completed (0-100)
   // Joined data
   ski_feature?: SkiFeature
+}
+
+export interface DescentSession {
+  id: string
+  session_id: string
+  user_id: string
+  started_at: string
+  ended_at?: string | null
+  total_segments: number
+  total_distance_meters: number
+  total_vertical_meters: number
+  top_speed_kmh: number
+  avg_speed_kmh: number
+  is_active: boolean
+  // Joined data
+  segments?: RunCompletion[]
+}
+
+export interface OffTrailSegment {
+  featureId: string | null // null for off-trail
+  featureName: string // e.g., "Off-trail (from Run Name)"
+  featureType: string
+  startTime: Date
+  locationHistory: Array<{
+    lat: number
+    lng: number
+    altitude?: number
+    speed?: number
+    timestamp: Date
+  }>
+  topSpeed: number
+  associatedRunId: string // The run they left
+  associatedRunName: string
+  isCompleted: boolean
+  completedAt?: Date
 }
 
 export interface LocationHistory {
@@ -171,4 +212,5 @@ export interface SessionSummary extends SkiSession {
   resort?: Resort
   run_completions?: RunCompletion[]
   unique_runs_count?: number
+  descent_sessions?: DescentSession[]
 }

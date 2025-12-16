@@ -27,7 +27,7 @@ SELECT id, name, slug FROM resorts WHERE slug = 'your-resort-slug';
 ### Step 2: Import Lifts
 
 ```bash
-npx tsx scripts/filter-and-import-ski-features.ts "2719c1b8-49d7-474a-8d35-59cf9e70331b" "4e9295e870b927f90f542cd716b60fe0c2b04cb8" docs/lifts.geojson lift
+npx tsx scripts/filter-and-import-ski-features.ts "6f35790a-b42a-4754-a101-3a8b5764e439" "53eb896b4026759b023a4bae550df280bd0c4fdb" docs/lifts.geojson lift
 ```
 
 ### Step 3: Import Runs/Trails

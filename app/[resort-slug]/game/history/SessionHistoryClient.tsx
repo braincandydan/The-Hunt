@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
-import { SkiSession, RunCompletion, SkiFeature } from '@/lib/utils/types'
+import { SkiSession, RunCompletion, SkiFeature, DescentSession } from '@/lib/utils/types'
 import RunDetailModal from './RunDetailModal'
 import booleanPointInPolygon from '@turf/boolean-point-in-polygon'
 import { point, polygon } from '@turf/helpers'
@@ -14,32 +14,26 @@ interface SessionHistoryClientProps {
   resortName: string
   sessions: SkiSession[]
   completionsBySession: Record<string, RunCompletion[]>
+  descentSessionsBySession: Record<string, DescentSession[]>
+  completionsByDescentSession: Record<string, RunCompletion[]>
   skiFeatures: SkiFeature[]
 }
 
 // Format date nicely
 function formatDate(dateStr: string): string {
-  // Parse date string as local date (not UTC) to avoid timezone issues
-  // dateStr is in format "YYYY-MM-DD" from database
-  const [year, month, day] = dateStr.split('-').map(Number)
-  const date = new Date(year, month - 1, day) // month is 0-indexed
-  const today = new Date()
-  const yesterday = new Date(today)
-  yesterday.setDate(yesterday.getDate() - 1)
-  
-  // Compare dates by year/month/day only (ignore time)
-  const dateStrFormatted = date.toDateString()
-  const todayStrFormatted = today.toDateString()
-  const yesterdayStrFormatted = yesterday.toDateString()
-  
-  if (dateStrFormatted === todayStrFormatted) return 'Today'
-  if (dateStrFormatted === yesterdayStrFormatted) return 'Yesterday'
-  
-  return date.toLocaleDateString('en-US', { 
-    weekday: 'long',
-    month: 'short', 
-    day: 'numeric'
-  })
+  const date = new Date(dateStr)
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function formatTime(dateStr: string): string {
+  const date = new Date(dateStr)
+  return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
+}
+
+function formatDuration(seconds: number): string {
+  const mins = Math.floor(seconds / 60)
+  const secs = seconds % 60
+  return `${mins}:${String(secs).padStart(2, '0')}`
 }
 
 // Difficulty badge
@@ -109,6 +103,8 @@ function isPointInResortBoundary(lat: number, lng: number, boundary: SkiFeature 
 function SessionCard({ 
   session, 
   completions,
+  descentSessions,
+  completionsByDescentSession,
   skiFeatures,
   isExpanded,
   onToggle,
@@ -117,6 +113,8 @@ function SessionCard({
 }: { 
   session: SkiSession
   completions: RunCompletion[]
+  descentSessions: DescentSession[]
+  completionsByDescentSession: Record<string, RunCompletion[]>
   skiFeatures: SkiFeature[]
   isExpanded: boolean
   onToggle: () => void
@@ -132,6 +130,13 @@ function SessionCard({
   const [routeLoading, setRouteLoading] = useState(false)
   const prevRouteLoadingRef = useRef(routeLoading) // Track previous route loading state - must be after routeLoading state
   const [calculatedMetrics, setCalculatedMetrics] = useState<{ topSpeed: number; avgSpeed: number; verticalMeters: number } | null>(null)
+  const [diagnosticData, setDiagnosticData] = useState<{
+    missedDetections: number
+    pointsNearRuns: number
+    avgDistance: number | null
+    closestRun: string | null
+  } | null>(null)
+  const [showDiagnostics, setShowDiagnostics] = useState(false)
   const supabaseRef = useRef(createClient())
   const supabase = supabaseRef.current
   
@@ -235,6 +240,40 @@ function SessionCard({
     
     fetchRoute()
   }, [session.id, routeData, routeLoading, supabase, resortBoundary])
+  
+  // Fetch diagnostic data for missed run detections
+  useEffect(() => {
+    if (!isExpanded || !showDiagnostics) return
+    
+    const fetchDiagnostics = async () => {
+      try {
+        const { data, error } = await supabase.rpc('diagnose_undetected_runs_summary', {
+          p_session_id: session.id,
+          p_proximity_threshold: 30,
+          p_sample_rate: 10
+        })
+        
+        if (error) {
+          console.warn('Error fetching diagnostics:', error)
+          return
+        }
+        
+        if (data && data.length > 0) {
+          const summary = data[0]
+          setDiagnosticData({
+            missedDetections: summary.missed_detections || 0,
+            pointsNearRuns: summary.points_near_runs || 0,
+            avgDistance: summary.avg_distance || null,
+            closestRun: summary.closest_run_name || null
+          })
+        }
+      } catch (err) {
+        console.warn('Error fetching diagnostic data:', err)
+      }
+    }
+    
+    fetchDiagnostics()
+  }, [session.id, isExpanded, showDiagnostics, supabase])
   
   // Reset route data and cleanup map when collapsed
   useEffect(() => {
@@ -489,45 +528,139 @@ function SessionCard({
               }
             }
             
-            // Draw each segment as a separate polyline
-            // Use purple color if there are no run completions (tracked route without associated trail)
-            // Use blue color if there are run completions (tracked route with associated trails)
-            const routeColor = completions.length === 0 ? '#a855f7' : '#3b82f6' // Purple for unassociated routes, blue for associated
+            // Draw GPS tracking route as orange lines for testing/comparison
+            // This shows the raw GPS track so we can compare it to detected run lines
+            const routeColor = '#f97316' // Orange for GPS tracking data
             
             for (const segment of segments) {
               const segmentCoords = segment.map(c => [c[1], c[0]] as [number, number])
               L.polyline(segmentCoords, {
                 color: routeColor,
-                weight: 3,
-                opacity: 0.8,
-                smoothFactor: 1
+                weight: 2,
+                opacity: 0.6,
+                smoothFactor: 1,
+                dashArray: '5, 5' // Dashed line to distinguish from run lines
               }).addTo(map)
             }
           }
         }
       }
       
-      // Draw completed runs (on top of route)
+      // Draw all trails first (faded background for context)
       const difficultyColors: Record<string, string> = {
         'green': '#22c55e',
         'blue': '#3b82f6',
         'black': '#1f2937',
-        'double-black': '#1f2937',
+        'double-black': '#7c3aed', // Purple for double-black
         'terrain-park': '#f97316',
         'other': '#9ca3af'
       }
       
-      // Compute unique runs inside effect to avoid dependency issues
-      const uniqueRunIdsInEffect = new Set(completions.map(c => c.ski_feature_id))
-      const uniqueRunsInEffect = skiFeatures.filter(f => uniqueRunIdsInEffect.has(f.id))
-      for (const feature of uniqueRunsInEffect) {
-        if (feature.geometry.type === 'LineString') {
-          const coords = feature.geometry.coordinates.map(c => [c[1], c[0]] as [number, number])
-          L.polyline(coords, {
-            color: difficultyColors[feature.difficulty || 'other'],
-            weight: 4,
-            opacity: 0.9
+      // Draw all trails as faded background
+      // Only show trails (not lifts, boundaries, etc.)
+      const trails = skiFeatures.filter(f => f.type === 'trail')
+      for (const trail of trails) {
+        if (!trail.geometry) continue
+        
+        let coordsToDraw: number[][][] = []
+        
+        if (trail.geometry.type === 'LineString') {
+          coordsToDraw = [trail.geometry.coordinates]
+        } else if (trail.geometry.type === 'MultiLineString') {
+          coordsToDraw = trail.geometry.coordinates
+        } else {
+          continue
+        }
+        
+        const difficulty = trail.difficulty || 'other'
+        const color = difficultyColors[difficulty] || difficultyColors['other']
+        
+        // Draw each line segment with faded styling
+        for (const coords of coordsToDraw) {
+          const leafletCoords = coords.map(c => [c[1], c[0]] as [number, number])
+          L.polyline(leafletCoords, {
+            color: color,
+            weight: 2, // Thinner than user tracks
+            opacity: 0.3, // Faded out
+            lineCap: 'round',
+            lineJoin: 'round',
+            interactive: false // Don't show popups on background trails
           }).addTo(map)
+        }
+      }
+      
+      // Draw each run segment using its GPS track (actual path taken)
+      // These will appear on top of the faded trails
+      // This shows the complete descent journey including partial runs and transitions
+      for (const completion of completions) {
+        // Get feature for difficulty color (even for off-trail segments that have associated_run_id)
+        const feature = completion.ski_feature || skiFeatures.find(f => f.id === completion.ski_feature_id)
+        const isOffTrail = completion.segment_type === 'off_trail'
+        
+        // Get difficulty color - use amber for off-trail, otherwise use feature difficulty
+        let color: string
+        if (isOffTrail) {
+          color = '#f59e0b' // Amber for off-trail
+        } else if (feature) {
+          const difficulty = feature.difficulty || 'other'
+          color = difficultyColors[difficulty] || difficultyColors['other']
+        } else {
+          color = difficultyColors['other']
+        }
+        
+        // Use GPS track from completion if available (actual path taken)
+        if (completion.gps_track && completion.gps_track.type === 'LineString' && completion.gps_track.coordinates.length >= 2) {
+          const leafletCoords = completion.gps_track.coordinates.map((c: number[]) => [c[1], c[0]] as [number, number])
+          const line = L.polyline(leafletCoords, {
+            color: color,
+            weight: isOffTrail ? 4 : 5,
+            opacity: isOffTrail ? 0.7 : 0.95,
+            lineCap: 'round',
+            lineJoin: 'round',
+            dashArray: isOffTrail ? '8, 4' : undefined // Dashed for off-trail
+          }).addTo(map)
+          
+          // Add popup with completion info
+          const completionPercent = completion.completion_percentage !== null && completion.completion_percentage !== undefined
+            ? `${completion.completion_percentage.toFixed(0)}%`
+            : 'N/A'
+          const runName = isOffTrail 
+            ? `Off-trail (from ${feature?.name || 'Unknown'})`
+            : (feature?.name || 'Unknown Run')
+          line.bindPopup(`
+            <div class="text-sm">
+              <div class="font-semibold">${runName}</div>
+              ${!isOffTrail ? `<div>Completed: ${completionPercent}</div>` : ''}
+              ${completion.top_speed_kmh ? `<div>Top Speed: ${completion.top_speed_kmh.toFixed(0)} km/h</div>` : ''}
+              ${completion.duration_seconds ? `<div>Duration: ${Math.floor(completion.duration_seconds / 60)}:${String(completion.duration_seconds % 60).padStart(2, '0')}</div>` : ''}
+            </div>
+          `)
+        } else if (feature && feature.geometry && !isOffTrail) {
+          // Fallback: draw full run line if GPS track not available (for older data)
+          let coordsToDraw: number[][][] = []
+          
+          if (feature.geometry.type === 'LineString') {
+            coordsToDraw = [feature.geometry.coordinates]
+          } else if (feature.geometry.type === 'MultiLineString') {
+            coordsToDraw = feature.geometry.coordinates
+          } else {
+            continue
+          }
+          
+          const difficulty = feature.difficulty || 'other'
+          const fallbackColor = difficultyColors[difficulty] || difficultyColors['other']
+          
+          for (const coords of coordsToDraw) {
+            const leafletCoords = coords.map(c => [c[1], c[0]] as [number, number])
+            L.polyline(leafletCoords, {
+              color: fallbackColor,
+              weight: 4,
+              opacity: 0.6,
+              lineCap: 'round',
+              lineJoin: 'round',
+              dashArray: '2, 2' // Dashed to indicate it's a fallback (no GPS track)
+            }).addTo(map)
+          }
         }
       }
       
@@ -668,15 +801,18 @@ function SessionCard({
           }
           
           // Draw each segment as a separate polyline
-          const routeColor = completions.length === 0 ? '#a855f7' : '#3b82f6'
+          // Draw GPS tracking route as orange lines for testing/comparison
+          // This shows the raw GPS track so we can compare it to detected run lines
+          const routeColor = '#f97316' // Orange for GPS tracking data
           
           for (const segment of segments) {
             const segmentCoords = segment.map(c => [c[1], c[0]] as [number, number])
             L.polyline(segmentCoords, {
               color: routeColor,
-              weight: 3,
-              opacity: 0.8,
-              smoothFactor: 1
+              weight: 2,
+              opacity: 0.6,
+              smoothFactor: 1,
+              dashArray: '5, 5' // Dashed line to distinguish from run lines
             }).addTo(map)
           }
           
@@ -814,56 +950,303 @@ function SessionCard({
             />
           </div>
           
-          {/* Run list */}
-          <div className="p-4 space-y-2 max-h-64 overflow-y-auto">
-            <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
-              Runs Completed
-            </h4>
-            {completions.map((completion, i) => {
-              const feature = skiFeatures.find(f => f.id === completion.ski_feature_id)
-              return (
-                <button
-                  key={completion.id}
-                  onClick={() => onRunClick(completion)}
-                  className="w-full flex items-center gap-3 py-2 px-3 bg-white/5 rounded-lg hover:bg-white/10 transition-colors text-left"
+          {/* Diagnostic panel */}
+          {isExpanded && (
+            <div className="px-4 pt-4 border-b border-white/10">
+              <button
+                onClick={() => setShowDiagnostics(!showDiagnostics)}
+                className="w-full flex items-center justify-between text-xs text-gray-400 hover:text-gray-300 transition-colors"
+              >
+                <span className="flex items-center gap-2">
+                  <span>🔍</span>
+                  <span>Run Detection Diagnostics</span>
+                </span>
+                <svg 
+                  className={`w-4 h-4 transition-transform ${showDiagnostics ? 'rotate-180' : ''}`}
+                  fill="none" 
+                  stroke="currentColor" 
+                  viewBox="0 0 24 24"
                 >
-                  <span className="text-gray-500 text-sm w-6">{i + 1}.</span>
-                  <DifficultyBadge difficulty={feature?.difficulty ?? undefined} />
-                  <span className="flex-1 font-medium text-white truncate">
-                    {feature?.name || 'Unknown Run'}
-                  </span>
-                  {completion.top_speed_kmh && (
-                    <span className="text-xs text-gray-400">
-                      {completion.top_speed_kmh.toFixed(0)} km/h
-                    </span>
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+              
+              {showDiagnostics && (
+                <div className="mt-3 pb-4 space-y-2 text-xs">
+                  {diagnosticData ? (
+                    <>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded p-2">
+                          <div className="text-yellow-400 font-semibold">{diagnosticData.missedDetections}</div>
+                          <div className="text-yellow-300/70">Missed Detections</div>
+                        </div>
+                        <div className="bg-blue-500/10 border border-blue-500/30 rounded p-2">
+                          <div className="text-blue-400 font-semibold">{diagnosticData.pointsNearRuns}</div>
+                          <div className="text-blue-300/70">Points Near Runs</div>
+                        </div>
+                      </div>
+                      {diagnosticData.avgDistance !== null && (
+                        <div className="text-gray-400">
+                          Avg distance: {diagnosticData.avgDistance.toFixed(1)}m
+                          {diagnosticData.closestRun && (
+                            <span className="ml-2">• Closest: {diagnosticData.closestRun}</span>
+                          )}
+                        </div>
+                      )}
+                      {diagnosticData.missedDetections > 0 && (
+                        <div className="text-yellow-400 text-xs mt-2 p-2 bg-yellow-500/10 rounded border border-yellow-500/30">
+                          ⚠️ {diagnosticData.missedDetections} GPS points were within 30m of runs but didn't result in completions.
+                          This may indicate the proximity threshold needs adjustment or there were tracking issues.
+                        </div>
+                      )}
+                      {diagnosticData.missedDetections === 0 && (
+                        <div className="text-green-400 text-xs mt-2">
+                          ✓ All GPS points near runs were successfully detected
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="text-gray-500">Loading diagnostics...</div>
                   )}
-                  {completion.duration_seconds && (
-                    <span className="text-xs text-gray-400">
-                      {Math.floor(completion.duration_seconds / 60)}:{String(completion.duration_seconds % 60).padStart(2, '0')}
-                    </span>
-                  )}
-                  <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                  </svg>
-                </button>
-              )
-            })}
-            
-            {completions.length === 0 && (
-              <div className="text-center py-8 text-gray-400">
-                <p>No runs recorded for this session</p>
-                {routeData && routeData.coordinates.length > 0 && (
-                  <div className="mt-2 space-y-1">
-                    <p className="text-xs text-gray-500">
-                      GPS route is shown on the map above
-                    </p>
-                    <p className="text-xs text-purple-400 flex items-center justify-center gap-1">
-                      <span className="w-2 h-2 bg-purple-500 rounded-full"></span>
-                      Tracked route (not associated with a trail)
-                    </p>
+                  <div className="text-gray-500 text-xs mt-2 pt-2 border-t border-white/10">
+                    Tip: Run <code className="bg-gray-900 px-1 rounded">SELECT * FROM diagnose_undetected_runs('{session.id}')</code> in Supabase SQL Editor for detailed analysis
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* Descent Sessions or Run list */}
+          <div className="p-4 space-y-2 max-h-64 overflow-y-auto">
+            {descentSessions.length > 0 ? (
+              <>
+                <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
+                  Descent Sessions
+                </h4>
+                {descentSessions.map((descent, descentIdx) => {
+                  const segments = completionsByDescentSession[descent.id] || []
+                  const duration = descent.ended_at 
+                    ? Math.round((new Date(descent.ended_at).getTime() - new Date(descent.started_at).getTime()) / 1000)
+                    : null
+                  return (
+                    <div key={descent.id} className="mb-4 last:mb-0">
+                      <div className="bg-white/5 rounded-lg p-3 mb-2">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="text-sm font-semibold text-white">
+                            Descent {descentIdx + 1}
+                          </div>
+                          <div className="text-xs text-gray-400">
+                            {segments.length} {segments.length === 1 ? 'segment' : 'segments'}
+                          </div>
+                        </div>
+                        
+                        {/* Time range */}
+                        <div className="text-xs text-gray-400 mb-2">
+                          <div className="flex items-center gap-2">
+                            <span>🕐</span>
+                            <span>
+                              {formatTime(descent.started_at)}
+                              {descent.ended_at && ` - ${formatTime(descent.ended_at)}`}
+                              {duration && ` (${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, '0')})`}
+                            </span>
+                          </div>
+                        </div>
+                        
+                        {/* Stats grid */}
+                        <div className="grid grid-cols-2 gap-2 mt-2">
+                          {descent.total_vertical_meters > 0 && (
+                            <div className="text-xs">
+                              <div className="text-gray-400">Vertical</div>
+                              <div className="text-white font-medium">{descent.total_vertical_meters.toFixed(0)} m</div>
+                            </div>
+                          )}
+                          {descent.total_distance_meters > 0 && (
+                            <div className="text-xs">
+                              <div className="text-gray-400">Distance</div>
+                              <div className="text-white font-medium">{(descent.total_distance_meters / 1000).toFixed(2)} km</div>
+                            </div>
+                          )}
+                          {descent.top_speed_kmh > 0 && (
+                            <div className="text-xs">
+                              <div className="text-gray-400">Top Speed</div>
+                              <div className="text-white font-medium">{descent.top_speed_kmh.toFixed(0)} km/h</div>
+                            </div>
+                          )}
+                          {descent.avg_speed_kmh > 0 && (
+                            <div className="text-xs">
+                              <div className="text-gray-400">Avg Speed</div>
+                              <div className="text-white font-medium">{descent.avg_speed_kmh.toFixed(1)} km/h</div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="space-y-1 pl-2 border-l-2 border-gray-700">
+                        {segments.map((completion, i) => {
+                          const feature = skiFeatures.find(f => f.id === completion.ski_feature_id)
+                          const isOffTrail = completion.segment_type === 'off_trail'
+                          return (
+                            <button
+                              key={completion.id}
+                              onClick={() => onRunClick(completion)}
+                              className="w-full flex items-center gap-3 py-2 px-3 bg-white/5 rounded-lg hover:bg-white/10 transition-colors text-left"
+                            >
+                              <span className="text-gray-500 text-sm w-6">{i + 1}.</span>
+                              {isOffTrail ? (
+                                <span className="w-4 h-4 text-xs text-amber-400">🌲</span>
+                              ) : (
+                                <DifficultyBadge difficulty={feature?.difficulty ?? undefined} />
+                              )}
+                              <span className="flex-1 font-medium text-white truncate">
+                                {isOffTrail 
+                                  ? `Off-trail (from ${feature?.name || 'Unknown'})`
+                                  : (feature?.name || 'Unknown Run')
+                                }
+                                {!isOffTrail && completion.completion_percentage !== null && completion.completion_percentage !== undefined && (
+                                  <span className="ml-2 text-xs text-gray-400 font-normal">
+                                    ({completion.completion_percentage.toFixed(0)}%)
+                                  </span>
+                                )}
+                              </span>
+                              {completion.top_speed_kmh && (
+                                <span className="text-xs text-gray-400">
+                                  {completion.top_speed_kmh.toFixed(0)} km/h
+                                </span>
+                              )}
+                              {completion.duration_seconds && (
+                                <span className="text-xs text-gray-400">
+                                  {Math.floor(completion.duration_seconds / 60)}:{String(completion.duration_seconds % 60).padStart(2, '0')}
+                                </span>
+                              )}
+                              <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                              </svg>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )
+                })}
+                
+                {/* Show runs that aren't in any descent session */}
+                {(() => {
+                  const runsInDescents = new Set(
+                    Object.values(completionsByDescentSession).flat().map(c => c.id)
+                  )
+                  const unassociatedRuns = completions.filter(
+                    c => c.ski_feature_id && !runsInDescents.has(c.id)
+                  )
+                  
+                  if (unassociatedRuns.length > 0) {
+                    return (
+                      <div className="mt-4 pt-4 border-t border-yellow-500/30">
+                        <div className="text-xs text-yellow-400 mb-2 font-medium flex items-center gap-2">
+                          <span>⚠️</span>
+                          <span>Unassociated Runs ({unassociatedRuns.length})</span>
+                        </div>
+                        <div className="text-xs text-yellow-300/70 mb-2">
+                          These runs are tracked but not in a descent session. They may need to be retroactively associated.
+                        </div>
+                        <div className="space-y-1 pl-2 border-l-2 border-yellow-500/30">
+                          {unassociatedRuns.map((completion, i) => {
+                            const feature = skiFeatures.find(f => f.id === completion.ski_feature_id)
+                            return (
+                              <button
+                                key={completion.id}
+                                onClick={() => onRunClick(completion)}
+                                className="w-full flex items-center gap-3 py-2 px-3 bg-yellow-500/10 rounded-lg hover:bg-yellow-500/20 transition-colors text-left"
+                              >
+                                <span className="text-yellow-400 text-sm w-6">{i + 1}.</span>
+                                <DifficultyBadge difficulty={feature?.difficulty ?? undefined} />
+                                <span className="flex-1 font-medium text-white truncate">
+                                  {feature?.name || 'Unknown Run'}
+                                </span>
+                                {completion.top_speed_kmh && (
+                                  <span className="text-xs text-yellow-300/70">
+                                    {completion.top_speed_kmh.toFixed(0)} km/h
+                                  </span>
+                                )}
+                                {completion.duration_seconds && (
+                                  <span className="text-xs text-yellow-300/70">
+                                    {Math.floor(completion.duration_seconds / 60)}:{String(completion.duration_seconds % 60).padStart(2, '0')}
+                                  </span>
+                                )}
+                                <svg className="w-4 h-4 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                </svg>
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )
+                  }
+                  return null
+                })()}
+              </>
+            ) : (
+              <>
+                <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
+                  Runs Completed
+                </h4>
+                {completions.map((completion, i) => {
+                  const feature = skiFeatures.find(f => f.id === completion.ski_feature_id)
+                  const isUnassociated = !completion.descent_session_id
+                  return (
+                    <button
+                      key={completion.id}
+                      onClick={() => onRunClick(completion)}
+                      className={`w-full flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-white/10 transition-colors text-left ${
+                        isUnassociated ? 'bg-yellow-500/10 border border-yellow-500/30' : 'bg-white/5'
+                      }`}
+                    >
+                      <span className={`text-sm w-6 ${isUnassociated ? 'text-yellow-400' : 'text-gray-500'}`}>
+                        {i + 1}.
+                        {isUnassociated && <span className="ml-1">⚠️</span>}
+                      </span>
+                      <DifficultyBadge difficulty={feature?.difficulty ?? undefined} />
+                      <span className="flex-1 font-medium text-white truncate">
+                        {feature?.name || 'Unknown Run'}
+                      </span>
+                      {isUnassociated && (
+                        <span className="text-xs text-yellow-400" title="Not in a descent session">
+                          Unassociated
+                        </span>
+                      )}
+                      {completion.top_speed_kmh && (
+                        <span className="text-xs text-gray-400">
+                          {completion.top_speed_kmh.toFixed(0)} km/h
+                        </span>
+                      )}
+                      {completion.duration_seconds && (
+                        <span className="text-xs text-gray-400">
+                          {Math.floor(completion.duration_seconds / 60)}:{String(completion.duration_seconds % 60).padStart(2, '0')}
+                        </span>
+                      )}
+                      <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                    </button>
+                  )
+                })}
+                
+                {completions.length === 0 && (
+                  <div className="text-center py-8 text-gray-400">
+                    <p>No runs recorded for this session</p>
+                    {routeData && routeData.coordinates.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        <p className="text-xs text-gray-500">
+                          GPS route is shown on the map above
+                        </p>
+                        <p className="text-xs text-purple-400 flex items-center justify-center gap-1">
+                          <span className="w-2 h-2 bg-purple-500 rounded-full"></span>
+                          Tracked route (not associated with a trail)
+                        </p>
+                      </div>
+                    )}
                   </div>
                 )}
-              </div>
+              </>
             )}
           </div>
         </div>
@@ -877,6 +1260,8 @@ export default function SessionHistoryClient({
   resortName,
   sessions,
   completionsBySession,
+  descentSessionsBySession,
+  completionsByDescentSession,
   skiFeatures
 }: SessionHistoryClientProps) {
 
@@ -1001,6 +1386,8 @@ export default function SessionHistoryClient({
                 key={session.id}
                 session={session}
                 completions={completionsBySession[session.id] || []}
+                descentSessions={descentSessionsBySession[session.id] || []}
+                completionsByDescentSession={completionsByDescentSession}
                 skiFeatures={skiFeatures}
                 isExpanded={expandedSession === session.id}
                 onToggle={() => setExpandedSession(

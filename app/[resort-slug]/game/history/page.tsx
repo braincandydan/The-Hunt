@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server'
 import { redirect, notFound } from 'next/navigation'
 import SessionHistoryClient from './SessionHistoryClient'
+import { RunCompletion } from '@/lib/utils/types'
 
 export default async function SessionHistoryPage({
   params,
@@ -40,9 +41,9 @@ export default async function SessionHistoryPage({
     .order('session_date', { ascending: false })
     .limit(30)
 
-  // Fetch run completions for each session
+  // Fetch run completions and descent sessions for each session
   const sessionIds = sessions?.map(s => s.id) || []
-  const [allCompletionsResult, locationHistoryResult] = await Promise.all([
+  const [allCompletionsResult, locationHistoryResult, descentSessionsResult] = await Promise.all([
     sessionIds.length > 0 
       ? supabase
           .from('run_completions')
@@ -61,11 +62,19 @@ export default async function SessionHistoryPage({
           // Use a higher limit or get distinct session IDs to ensure we catch all sessions
           // Since we're just checking existence, we can use a larger limit
           .limit(10000)
+      : { data: [], error: null },
+    sessionIds.length > 0
+      ? supabase
+          .from('descent_sessions')
+          .select('*')
+          .in('session_id', sessionIds)
+          .order('started_at', { ascending: false })
       : { data: [], error: null }
   ])
 
   const { data: allCompletions } = allCompletionsResult
   const { data: locationHistory } = locationHistoryResult
+  const { data: descentSessions } = descentSessionsResult
 
   // Group completions by session
   const completionsBySession = (allCompletions || []).reduce((acc, completion) => {
@@ -75,6 +84,35 @@ export default async function SessionHistoryPage({
     acc[completion.session_id].push(completion)
     return acc
   }, {} as Record<string, typeof allCompletions>)
+
+  // Group descent sessions by session_id
+  const descentSessionsBySession = (descentSessions || []).reduce((acc, descent) => {
+    if (!acc[descent.session_id]) {
+      acc[descent.session_id] = []
+    }
+    acc[descent.session_id].push(descent)
+    return acc
+  }, {} as Record<string, typeof descentSessions>)
+
+  // Group completions by descent session and sort by sequence order
+  const completionsByDescentSession = (allCompletions || []).reduce((acc, completion) => {
+    if (completion.descent_session_id) {
+      if (!acc[completion.descent_session_id]) {
+        acc[completion.descent_session_id] = []
+      }
+      acc[completion.descent_session_id].push(completion)
+    }
+    return acc
+  }, {} as Record<string, typeof allCompletions>)
+
+  // Sort completions within each descent session by sequence_order
+  Object.keys(completionsByDescentSession).forEach(descentId => {
+    completionsByDescentSession[descentId].sort((a: RunCompletion, b: RunCompletion) => {
+      const orderA = a.sequence_order ?? 999999
+      const orderB = b.sequence_order ?? 999999
+      return orderA - orderB
+    })
+  })
 
   // Get unique session IDs that have location history
   const sessionsWithLocationHistory = new Set(
@@ -104,6 +142,8 @@ export default async function SessionHistoryPage({
       resortName={resort.name}
       sessions={sessionsWithData}
       completionsBySession={completionsBySession}
+      descentSessionsBySession={descentSessionsBySession}
+      completionsByDescentSession={completionsByDescentSession}
       skiFeatures={skiFeatures || []}
     />
   )

@@ -221,6 +221,7 @@ export default function MapPageWrapper({
             '/3d-map/geojson/TreeBackground.geojson',
             '/3d-map/geojson/SkiRunBackground.geojson',
           ]}
+          proximityThreshold={30}
         />
       </ErrorBoundary>
 

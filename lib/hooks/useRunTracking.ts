@@ -3,7 +3,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { SkiFeature, SkiSession, RunCompletion } from '@/lib/utils/types'
-import { RunTracker, RunProgress, runProgressToDbFormat } from '@/lib/utils/run-tracking'
+import { RunTracker, RunProgress, runProgressToDbFormat, offTrailSegmentToDbFormat } from '@/lib/utils/run-tracking'
+import { OffTrailSegment } from '@/lib/utils/types'
 
 interface UseRunTrackingOptions {
   resortId: string
@@ -54,6 +55,8 @@ export function useRunTracking({
   const sessionIdRef = useRef<string | null>(null)
   const lastLocationSaveRef = useRef<number>(0)
   const pendingCompletionsRef = useRef<RunProgress[]>([])
+  const descentSessionIdRef = useRef<string | null>(null)
+  const pendingOffTrailSegmentsRef = useRef<OffTrailSegment[]>([])
   
   // Initialize tracker with ski features
   useEffect(() => {
@@ -142,6 +145,35 @@ export function useRunTracking({
     }
   }, [enabled, initializeSession])
   
+  // Get or create active descent session
+  const getOrCreateDescentSession = useCallback(async (): Promise<string | null> => {
+    if (!sessionIdRef.current || !userIdRef.current) return null
+    
+    try {
+      const supabase = supabaseRef.current
+      const { data: descentId, error } = await supabase
+        .rpc('get_or_create_active_descent_session', {
+          p_session_id: sessionIdRef.current,
+          p_user_id: userIdRef.current
+        })
+      
+      if (error) {
+        console.warn('Error getting/creating descent session:', error.message)
+        return null
+      }
+      
+      descentSessionIdRef.current = descentId
+      if (trackerRef.current) {
+        trackerRef.current.setDescentSessionId(descentId)
+      }
+      
+      return descentId
+    } catch (err) {
+      console.warn('Failed to get/create descent session:', err)
+      return null
+    }
+  }, [])
+  
   // Save run completion to database
   const saveRunCompletion = useCallback(async (run: RunProgress) => {
     if (!sessionIdRef.current || !userIdRef.current) {
@@ -151,7 +183,27 @@ export function useRunTracking({
     
     try {
       const supabase = supabaseRef.current
-      const dbRun = runProgressToDbFormat(run, sessionIdRef.current, userIdRef.current)
+      
+      // Get or create descent session
+      let descentId = descentSessionIdRef.current
+      if (!descentId) {
+        descentId = await getOrCreateDescentSession()
+      }
+      
+      // Get sequence order
+      let sequenceOrder: number | null = null
+      if (descentId && trackerRef.current) {
+        sequenceOrder = trackerRef.current.incrementSequenceOrder()
+      }
+      
+      const dbRun = runProgressToDbFormat(
+        run, 
+        sessionIdRef.current, 
+        userIdRef.current,
+        descentId,
+        sequenceOrder,
+        null
+      )
       
       const { error } = await supabase
         .from('run_completions')
@@ -183,7 +235,55 @@ export function useRunTracking({
       pendingCompletionsRef.current.push(run)
       return false
     }
-  }, [])
+  }, [getOrCreateDescentSession])
+  
+  // Save off-trail segment to database
+  const saveOffTrailSegment = useCallback(async (segment: OffTrailSegment) => {
+    if (!sessionIdRef.current || !userIdRef.current) {
+      pendingOffTrailSegmentsRef.current.push(segment)
+      return false
+    }
+    
+    try {
+      const supabase = supabaseRef.current
+      
+      // Get or create descent session
+      let descentId = descentSessionIdRef.current
+      if (!descentId) {
+        descentId = await getOrCreateDescentSession()
+      }
+      
+      // Get sequence order
+      let sequenceOrder: number | null = null
+      if (descentId && trackerRef.current) {
+        sequenceOrder = trackerRef.current.incrementSequenceOrder()
+      }
+      
+      const dbSegment = offTrailSegmentToDbFormat(
+        segment,
+        sessionIdRef.current,
+        userIdRef.current,
+        descentId,
+        sequenceOrder
+      )
+      
+      const { error } = await supabase
+        .from('run_completions')
+        .insert(dbSegment)
+      
+      if (error) {
+        console.warn('Error saving off-trail segment:', error.message)
+        pendingOffTrailSegmentsRef.current.push(segment)
+        return false
+      }
+      
+      return true
+    } catch (err) {
+      console.warn('Failed to save off-trail segment:', err)
+      pendingOffTrailSegmentsRef.current.push(segment)
+      return false
+    }
+  }, [getOrCreateDescentSession])
   
   // Save location to history
   const saveLocation = useCallback(async (
@@ -243,12 +343,54 @@ export function useRunTracking({
   ) => {
     if (!trackerRef.current || !enabled) return
     
-    // Update tracker and get newly completed runs
-    const newlyCompleted = trackerRef.current.updateLocation(lat, lng, altitude, speed)
+    // Check if we should start/end descent session
+    if (trackerRef.current && altitude !== undefined && speed !== undefined) {
+      const isDescending = trackerRef.current.isDescending(altitude, speed)
+      const shouldEnd = trackerRef.current.shouldEndDescent(speed)
+      
+      if (isDescending && !descentSessionIdRef.current) {
+        // Start descent session
+        getOrCreateDescentSession()
+      } else if (shouldEnd && descentSessionIdRef.current) {
+        // End descent session
+        const supabase = supabaseRef.current
+        const descentId = descentSessionIdRef.current
+        const userId = userIdRef.current!
+        
+        void (async () => {
+          try {
+            await supabase.rpc('end_descent_session', {
+              p_descent_id: descentId,
+              p_user_id: userId
+            })
+            descentSessionIdRef.current = null
+            if (trackerRef.current) {
+              trackerRef.current.setDescentSessionId(null)
+            }
+          } catch (err: unknown) {
+            console.warn('Failed to end descent session:', err)
+          }
+        })()
+      }
+    }
+    
+    // Update tracker and get newly completed runs, partial runs, and off-trail segments
+    const result = trackerRef.current.updateLocation(lat, lng, altitude, speed)
     
     // Save completed runs to database (async, doesn't cause re-render)
-    for (const run of newlyCompleted) {
+    for (const run of result.completedRuns) {
       saveRunCompletion(run)
+    }
+    
+    // Save partial runs to database (async, doesn't cause re-render)
+    // These are run segments that didn't meet the completion threshold but should still be tracked
+    for (const run of result.partialRuns) {
+      saveRunCompletion(run)
+    }
+    
+    // Save completed off-trail segment to database
+    if (result.completedOffTrailSegment) {
+      saveOffTrailSegment(result.completedOffTrailSegment)
     }
     
     // Save location to history (async, doesn't cause re-render)
@@ -275,7 +417,7 @@ export function useRunTracking({
         }
       }))
     }
-  }, [enabled, saveRunCompletion, saveLocation])
+  }, [enabled, saveRunCompletion, saveOffTrailSegment, saveLocation, getOrCreateDescentSession])
   
   // Manual run completion (e.g., from QR scan at run marker)
   const markRunCompleted = useCallback(async (featureId: string): Promise<boolean> => {
@@ -345,6 +487,22 @@ export function useRunTracking({
       await saveRunCompletion(run)
     }
     pendingCompletionsRef.current = []
+    
+    // Process any pending off-trail segments
+    for (const segment of pendingOffTrailSegmentsRef.current) {
+      await saveOffTrailSegment(segment)
+    }
+    pendingOffTrailSegmentsRef.current = []
+    
+    // End active descent session if any
+    if (descentSessionIdRef.current) {
+      const supabase = supabaseRef.current
+      await supabase.rpc('end_descent_session', {
+        p_descent_id: descentSessionIdRef.current,
+        p_user_id: userIdRef.current!
+      })
+      descentSessionIdRef.current = null
+    }
     
     setState(prev => ({
       ...prev,

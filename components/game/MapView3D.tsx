@@ -114,6 +114,9 @@ interface MapView3DProps {
   elevationScale?: number
   // Optional: Paths to additional GeoJSON files from QGIS exports
   additionalGeoJSONPaths?: string[] // e.g., ['/3d-map/geojson/tree-line.json', '/3d-map/geojson/runs.json']
+  // Proximity zone visualization
+  showProximityZones?: boolean
+  proximityThreshold?: number // meters
 }
 
 // Component to render markers in 3D space - uses 3D elements for smooth camera movement
@@ -840,6 +843,109 @@ function SkiTrail3D({
   )
 }
 
+// Component to render proximity zones around trails in 3D
+function ProximityZone3D({
+  feature,
+  sceneMetadata,
+  terrainMesh,
+  proximityThreshold
+}: {
+  feature: {
+    id: string
+    geometry: any
+    type: string
+  }
+  sceneMetadata: SceneMetadata
+  terrainMesh: THREE.Mesh
+  proximityThreshold: number
+}) {
+  const [bufferGeometry, setBufferGeometry] = useState<THREE.BufferGeometry | null>(null)
+
+  useEffect(() => {
+    if (!terrainMesh || !feature.geometry || feature.type !== 'trail') return
+
+    // Dynamically import turf buffer
+    import('@turf/turf').then((turf) => {
+      const buffer = turf.buffer || (turf as any).default?.buffer
+      if (!buffer) {
+        console.warn('Turf buffer not available')
+        return
+      }
+
+      try {
+        // Create GeoJSON feature
+        const geoJsonFeature: GeoJSON.Feature = {
+          type: 'Feature',
+          geometry: feature.geometry,
+          properties: {}
+        }
+
+        // Create buffer around trail
+        const buffered = buffer(geoJsonFeature, proximityThreshold, { units: 'meters' })
+        
+        if (!buffered || buffered.geometry.type !== 'Polygon') return
+
+        // Convert polygon coordinates to 3D points
+        const polygon = buffered.geometry as GeoJSON.Polygon
+        const coords = polygon.coordinates[0] // Outer ring
+        
+        const raycaster = new THREE.Raycaster()
+        const downDirection = new THREE.Vector3(0, -1, 0)
+        const vertices: number[] = []
+        const indices: number[] = []
+
+        // Project each point onto terrain
+        coords.forEach((coord: number[]) => {
+          const [x, y, z] = geoJsonToSceneCoords(coord, sceneMetadata)
+          const rayOrigin = new THREE.Vector3(x, 5000, z)
+          raycaster.set(rayOrigin, downDirection)
+          const intersects = raycaster.intersectObject(terrainMesh, false)
+          
+          let terrainY = y
+          if (intersects.length > 0) {
+            terrainY = intersects[0].point.y + 1 // Slightly above terrain
+          }
+          
+          vertices.push(x, terrainY, z)
+        })
+
+        // Create triangle indices for polygon
+        for (let i = 1; i < vertices.length / 3 - 1; i++) {
+          indices.push(0, i, i + 1)
+        }
+
+        const geometry = new THREE.BufferGeometry()
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
+        geometry.setIndex(indices)
+        geometry.computeVertexNormals()
+
+        setBufferGeometry(geometry)
+
+        return () => {
+          geometry.dispose()
+        }
+      } catch (err) {
+        console.warn(`Failed to create proximity zone for trail ${feature.id}:`, err)
+      }
+    }).catch((err) => {
+      console.warn('Failed to load turf buffer:', err)
+    })
+  }, [feature, sceneMetadata, terrainMesh, proximityThreshold])
+
+  if (!bufferGeometry) return null
+
+  return (
+    <mesh geometry={bufferGeometry} frustumCulled>
+      <meshStandardMaterial
+        color="#fbbf24"
+        transparent
+        opacity={0.2}
+        side={THREE.DoubleSide}
+      />
+    </mesh>
+  )
+}
+
 // Scene3D with terrain, signs, and GeoJSON overlay
 function Scene3D({ 
   sceneUrl,
@@ -848,6 +954,8 @@ function Scene3D({
   discoveredSignIds,
   resortSlug,
   skiFeatures = [],
+  showProximityZones = false,
+  proximityThreshold = 30,
 }: {
   sceneUrl?: string
   terrainMeshRef: React.MutableRefObject<THREE.Mesh | null>
@@ -862,6 +970,8 @@ function Scene3D({
     geometry: any
     status?: string
   }>
+  showProximityZones?: boolean
+  proximityThreshold?: number
 }) {
   const [sceneMetadata, setSceneMetadata] = useState<SceneMetadata | null>(null)
   const [testGeoJSON, setTestGeoJSON] = useState<GeoJSONFeatureCollection | null>(null)
@@ -928,6 +1038,19 @@ function Scene3D({
             feature={feature}
             sceneMetadata={sceneMetadata}
             terrainMesh={terrainMeshRef.current!}
+          />
+        ))}
+
+      {/* Proximity zones around trails */}
+      {showProximityZones && sceneMetadata && terrainLoaded && terrainMeshRef.current && skiFeatures
+        .filter(f => f.type === 'trail')
+        .map((feature) => (
+          <ProximityZone3D
+            key={`proximity-${feature.id}`}
+            feature={feature}
+            sceneMetadata={sceneMetadata}
+            terrainMesh={terrainMeshRef.current!}
+            proximityThreshold={proximityThreshold}
           />
         ))}
 
@@ -1153,6 +1276,8 @@ export default function MapView3D({
           discoveredSignIds={discoveredSignIds}
           resortSlug={resortSlug}
           skiFeatures={skiFeatures}
+          showProximityZones={showProximityZones}
+          proximityThreshold={proximityThreshold}
         />
         {/* Auto-position camera based on terrain */}
         <CameraController terrainMesh={terrainMeshRef.current} controlsRef={controlsRef} />
