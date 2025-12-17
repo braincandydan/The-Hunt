@@ -1088,6 +1088,8 @@ export default function MapView3D({
   center,
   elevationScale = 1,
   additionalGeoJSONPaths,
+  showProximityZones = false,
+  proximityThreshold = 30,
 }: MapView3DProps) {
   const [isTrackingLocation, setIsTrackingLocation] = useState(false)
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null)
