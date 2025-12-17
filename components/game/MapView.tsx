@@ -1294,7 +1294,7 @@ export default function MapView({ resortSlug, signs, discoveredSignIds, skiFeatu
     try {
       const turf = await import('@turf/turf')
       // Try different import patterns
-      buffer = turf.buffer || turf.default?.buffer || (turf as any).buffer
+      buffer = turf.buffer || (turf as any).default?.buffer || (turf as any).buffer
       if (!buffer && typeof turf === 'object' && 'buffer' in turf) {
         buffer = (turf as any).buffer
       }
