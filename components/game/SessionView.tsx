@@ -865,7 +865,7 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
       if (!descent) return
       
       const descentStart = new Date(descent.started_at).getTime()
-      const descentEnd = descent.ended_at ? new Date(descent.ended_at).getTime() : sessionEndTime
+      const descentEnd = descent.ended_at ? new Date(descent.ended_at).getTime() : (sessionEndTime ?? Date.now())
       
       // Find route segments that overlap with this descent
       const relevantSegments: Array<{start: number, end: number, duration: number}> = []
