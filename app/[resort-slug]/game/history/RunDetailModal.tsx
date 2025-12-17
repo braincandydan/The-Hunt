@@ -258,7 +258,7 @@ export default function RunDetailModal({ completion, skiFeature, onClose }: RunD
         {/* Header */}
         <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <DifficultyBadge difficulty={skiFeature?.difficulty} size="lg" />
+            <DifficultyBadge difficulty={skiFeature?.difficulty ?? undefined} size="lg" />
             <div>
               <h2 className="text-xl font-bold text-white">
                 {skiFeature?.name || 'Unknown Run'}
@@ -369,7 +369,7 @@ export default function RunDetailModal({ completion, skiFeature, onClose }: RunD
                 {skiFeature.difficulty && (
                   <div className="flex justify-between items-center">
                     <span className="text-sm text-gray-400">Difficulty</span>
-                    <DifficultyBadge difficulty={skiFeature.difficulty} size="sm" />
+                    <DifficultyBadge difficulty={skiFeature.difficulty ?? undefined} size="sm" />
                   </div>
                 )}
               </div>

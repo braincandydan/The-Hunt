@@ -1415,7 +1415,7 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
                         {isOffTrail ? (
                           <span className="text-amber-400 text-xs">🌲</span>
                         ) : (
-                          <DifficultyBadge difficulty={feature?.difficulty} />
+                          <DifficultyBadge difficulty={feature?.difficulty ?? undefined} />
                         )}
                         <span className="flex-1 text-white truncate text-[10px]">
                           {isOffTrail 
