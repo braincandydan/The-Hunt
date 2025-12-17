@@ -80,8 +80,10 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
   const [sessionEndTime, setSessionEndTime] = useState<number | null>(null)
   const [timelineStartTime, setTimelineStartTime] = useState<number | null>(null) // Current timeline range start
   const [timelineEndTime, setTimelineEndTime] = useState<number | null>(null) // Current timeline range end
+  const [routeSegmentsLoaded, setRouteSegmentsLoaded] = useState(false) // Track when route segments are loaded
   const scrubberMarkerRef = useRef<any>(null)
   const visibleDescentLayersRef = useRef<any[]>([]) // Descents visible at current scrub position
+  const lastRenderedDescentIndexRef = useRef<number | null>(null) // Track last rendered descent to avoid unnecessary redraws
   
   // Swipe gesture handling
   const touchStartX = useRef<number | null>(null)
@@ -103,15 +105,9 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
     }
   }, [selectedDescent, sessionData.descentSessions])
   
-  // Update selectedDescent when currentDescentIndex changes
-  useEffect(() => {
-    if (sessionData.descentSessions.length > 0) {
-      const descent = sessionData.descentSessions[currentDescentIndex]
-      if (descent) {
-        setSelectedDescent(descent.id)
-      }
-    }
-  }, [currentDescentIndex, sessionData.descentSessions])
+  // Update selectedDescent when currentDescentIndex changes - REMOVED
+  // This was causing the timeline to focus in when scrolling through it
+  // selectedDescent is now only set when the user explicitly clicks on a descent
   
   // Calculate total descent time (sum of all descent durations)
   const totalDescentTime = sessionData.descentSessions.reduce((total, descent) => {
@@ -133,24 +129,24 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
         setScrubPosition(0)
       }
     } else {
-      // When no descent selected, show all descents compressed (no gaps)
-      // The timeline represents only descent time, not gaps between them
-      if (sessionData.descentSessions.length > 0 && totalDescentTime > 0) {
-        // Use total descent time as the range (compressed, no gaps)
-        // We'll map scrub positions to actual descent times in getLocationAtScrubPosition
+      // When no descent selected, timeline is stretched evenly across all descents
+      // Just need a valid time range (doesn't matter what it is since we map by descent index)
+      if (sessionData.descentSessions.length > 0) {
         const firstDescent = sessionData.descentSessions[0]
-        const firstStart = new Date(firstDescent.started_at).getTime()
-        // Timeline end is start + total descent time (compressed)
-        setTimelineStartTime(firstStart)
-        setTimelineEndTime(firstStart + totalDescentTime)
+        const lastDescent = sessionData.descentSessions[sessionData.descentSessions.length - 1]
+        const firstTime = new Date(firstDescent.started_at).getTime()
+        const lastTime = lastDescent.ended_at ? new Date(lastDescent.ended_at).getTime() : (sessionEndTime || Date.now())
+        setTimelineStartTime(firstTime)
+        setTimelineEndTime(lastTime)
         setScrubPosition(0)
       } else if (sessionStartTime !== null && sessionEndTime !== null) {
+        // Fallback to session times
         setTimelineStartTime(sessionStartTime)
         setTimelineEndTime(sessionEndTime)
         setScrubPosition(0)
       }
     }
-  }, [selectedDescent, sessionData.descentSessions, sessionStartTime, sessionEndTime, totalDescentTime])
+  }, [selectedDescent, sessionData.descentSessions, sessionStartTime, sessionEndTime, totalDescentTime, routeSegmentsLoaded, locationHistory.length])
   
   // Swipe handlers
   const handleTouchStart = (e: React.TouchEvent) => {
@@ -240,6 +236,7 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
           .select('latitude, longitude, recorded_at')
           .eq('session_id', sessionId)
           .order('recorded_at', { ascending: true })
+          .limit(100000) // Ensure we get all location points (GPS tracking can generate many points)
         
         if (error || !locations || locations.length < 2) {
           return
@@ -356,6 +353,13 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
           
           // Store segments with timestamps for highlighting
           routeSegmentsWithTimestampsRef.current = segmentsWithTimestamps
+          
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/a0dd1b5e-6580-44ae-9b6f-c3dccc8fc69d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SessionView.tsx:354',message:'BACKGROUND ROUTE DATA',data:{totalSegments:segments.length,segmentsWithTimestampsCount:segmentsWithTimestamps.length,segmentLengths:segments.map(s=>s.length),segmentsWithTimestampsLengths:segmentsWithTimestamps.map(s=>s.coords.length)},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'DATA_SOURCE'})}).catch(()=>{});
+          // #endregion
+          
+          // Trigger purple line drawing now that segments are loaded
+          setRouteSegmentsLoaded(true)
           
           // Draw GPS route as orange dashed lines - add to completionPane (same high z-index)
           const routeColor = '#f97316'
@@ -734,7 +738,14 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
   
   // Get location at scrub position (handles compressed descent timeline)
   const getLocationAtScrubPosition = (position: number) => {
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/a0dd1b5e-6580-44ae-9b6f-c3dccc8fc69d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SessionView.tsx:740',message:'GET LOCATION AT SCRUB',data:{position,hasLocationHistory:locationHistory.length>0,timelineStartTime,timelineEndTime,selectedDescent,descentCount:sessionData.descentSessions.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run5',hypothesisId:'MARKER'})}).catch(()=>{});
+    // #endregion
+    
     if (!locationHistory.length || timelineStartTime === null || timelineEndTime === null) {
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/a0dd1b5e-6580-44ae-9b6f-c3dccc8fc69d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SessionView.tsx:748',message:'GET LOCATION EARLY RETURN',data:{reason:!locationHistory.length?'no location history':timelineStartTime===null?'no start time':'no end time'},timestamp:Date.now(),sessionId:'debug-session',runId:'run5',hypothesisId:'MARKER'})}).catch(()=>{});
+      // #endregion
       return null
     }
     
@@ -744,29 +755,59 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
       // When a descent is selected, use direct time mapping
       currentTime = timelineStartTime + (timelineEndTime - timelineStartTime) * position
     } else {
-      // When showing all descents compressed, map position to actual time across all descents ONLY (no gaps)
-      // Position 0-1 maps to total descent time (compressed, skipping gaps)
-      let cumulativeTime = 0
-      const targetTime = totalDescentTime * position
+      // Timeline is stretched evenly across all descents
+      // BUT we need to scrub through ROUTE SEGMENTS, not descent times
+      const totalDescents = sessionData.descentSessions.length
+      if (totalDescents === 0 || routeSegmentsWithTimestampsRef.current.length === 0) return null
       
-      // Initialize with first descent start as fallback
-      const firstDescent = sessionData.descentSessions[0]
-      currentTime = firstDescent ? new Date(firstDescent.started_at).getTime() : timelineStartTime
+      // Find which descent this position falls in
+      const descentIndex = Math.min(Math.floor(position * totalDescents), totalDescents - 1)
+      const positionInDescent = (position * totalDescents) - descentIndex
       
-      // Find which descent contains this position
-      for (const descent of sessionData.descentSessions) {
-        const descentStart = new Date(descent.started_at).getTime()
-        const descentEnd = descent.ended_at ? new Date(descent.ended_at).getTime() : (sessionEndTime || Date.now())
-        const descentDuration = descentEnd - descentStart
+      // Now find which route segments belong to this descent
+      const descent = sessionData.descentSessions[descentIndex]
+      if (!descent) return null
+      
+      const descentStart = new Date(descent.started_at).getTime()
+      const descentEnd = descent.ended_at ? new Date(descent.ended_at).getTime() : (sessionEndTime || Date.now())
+      
+      // Find route segments that overlap with this descent
+      const relevantSegments: Array<{start: number, end: number, duration: number}> = []
+      for (const segment of routeSegmentsWithTimestampsRef.current) {
+        if (segment.timestamps.length === 0) continue
         
-        if (cumulativeTime + descentDuration >= targetTime) {
-          // This is the descent we're in
-          const positionInDescent = (targetTime - cumulativeTime) / descentDuration
-          currentTime = descentStart + (descentEnd - descentStart) * positionInDescent
-          break
+        const segmentStart = new Date(segment.timestamps[0]).getTime()
+        const segmentEnd = new Date(segment.timestamps[segment.timestamps.length - 1]).getTime()
+        
+        // Check if this segment overlaps with the descent time range
+        if (segmentEnd >= descentStart && segmentStart <= descentEnd) {
+          relevantSegments.push({start: segmentStart, end: segmentEnd, duration: segmentEnd - segmentStart})
         }
+      }
+      
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/a0dd1b5e-6580-44ae-9b6f-c3dccc8fc69d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SessionView.tsx:774',message:'DESCENT SEGMENT MAPPING',data:{position,descentIndex,positionInDescent,descentStart,descentEnd,descentStartISO:new Date(descentStart).toISOString(),descentEndISO:new Date(descentEnd).toISOString(),relevantSegmentsCount:relevantSegments.length,relevantSegmentRanges:relevantSegments.map(s=>({startISO:new Date(s.start).toISOString(),endISO:new Date(s.end).toISOString()}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run6',hypothesisId:'SEGMENT_MAPPING'})}).catch(()=>{});
+      // #endregion
+      
+      if (relevantSegments.length === 0) {
+        // Fallback to descent time if no segments found
+        currentTime = descentStart + (descentEnd - descentStart) * positionInDescent
+      } else {
+        // Map position through the relevant route segments
+        const totalSegmentTime = relevantSegments.reduce((sum, seg) => sum + seg.duration, 0)
+        const targetTime = totalSegmentTime * positionInDescent
         
-        cumulativeTime += descentDuration
+        let cumulativeTime = 0
+        currentTime = relevantSegments[0].start // fallback
+        
+        for (const segment of relevantSegments) {
+          if (cumulativeTime + segment.duration >= targetTime) {
+            const posInSegment = (targetTime - cumulativeTime) / segment.duration
+            currentTime = segment.start + segment.duration * posInSegment
+            break
+          }
+          cumulativeTime += segment.duration
+        }
       }
     }
     
@@ -774,9 +815,8 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
       return null
     }
     
-    // Use filtered location history (only descent points) when showing compressed timeline
-    // This ensures we never search through gaps where location doesn't change
-    const locationsToSearch = !selectedDescent ? getDescentLocationHistory : locationHistory
+    // Use full location history to find the closest point
+    const locationsToSearch = locationHistory
     
     if (locationsToSearch.length === 0) {
       return null
@@ -794,6 +834,10 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
       }
     }
     
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/a0dd1b5e-6580-44ae-9b6f-c3dccc8fc69d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SessionView.tsx:786',message:'LOCATION FOUND',data:{position,descentIndex:selectedDescent?null:Math.floor(position*sessionData.descentSessions.length),currentTime,currentTimeISO:new Date(currentTime).toISOString(),closestLocationTime:closestLocation.recorded_at,closestLocationLat:closestLocation.latitude,closestLocationLng:closestLocation.longitude,minTimeDiff},timestamp:Date.now(),sessionId:'debug-session',runId:'run5',hypothesisId:'MARKER'})}).catch(()=>{});
+    // #endregion
+    
     return closestLocation
   }
   
@@ -803,35 +847,59 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
       return
     }
     
-    // Find which descent the scrub position is currently in
+    if (timelineStartTime === null || timelineEndTime === null) return
+    
     let currentTime: number
     
     if (selectedDescent) {
       // When a descent is selected, use direct time mapping
-      if (timelineStartTime === null || timelineEndTime === null) return
       currentTime = timelineStartTime + (timelineEndTime - timelineStartTime) * scrubPosition
     } else {
-      // When showing compressed timeline, map position to actual descent time
-      if (totalDescentTime === 0 || sessionEndTime === null) return
+      // Timeline is stretched evenly across all descents
+      // Find which descent this position falls in
+      const totalDescents = sessionData.descentSessions.length
+      const descentIndex = Math.min(Math.floor(scrubPosition * totalDescents), totalDescents - 1)
+      const positionInDescent = (scrubPosition * totalDescents) - descentIndex
       
-      let cumulativeTime = 0
-      const targetTime = totalDescentTime * scrubPosition
+      const descent = sessionData.descentSessions[descentIndex]
+      if (!descent) return
       
-      const firstDescent = sessionData.descentSessions[0]
-      currentTime = firstDescent ? new Date(firstDescent.started_at).getTime() : Date.now()
+      const descentStart = new Date(descent.started_at).getTime()
+      const descentEnd = descent.ended_at ? new Date(descent.ended_at).getTime() : sessionEndTime
       
-      for (const descent of sessionData.descentSessions) {
-        const descentStart = new Date(descent.started_at).getTime()
-        const descentEnd = descent.ended_at ? new Date(descent.ended_at).getTime() : sessionEndTime
-        const descentDuration = descentEnd - descentStart
+      // Find route segments that overlap with this descent
+      const relevantSegments: Array<{start: number, end: number, duration: number}> = []
+      for (const segment of routeSegmentsWithTimestampsRef.current) {
+        if (segment.timestamps.length === 0) continue
         
-        if (cumulativeTime + descentDuration >= targetTime) {
-          const positionInDescent = (targetTime - cumulativeTime) / descentDuration
-          currentTime = descentStart + (descentEnd - descentStart) * positionInDescent
-          break
+        const segmentStart = new Date(segment.timestamps[0]).getTime()
+        const segmentEnd = new Date(segment.timestamps[segment.timestamps.length - 1]).getTime()
+        
+        // Check if this segment overlaps with the descent time range
+        if (segmentEnd >= descentStart && segmentStart <= descentEnd) {
+          relevantSegments.push({start: segmentStart, end: segmentEnd, duration: segmentEnd - segmentStart})
         }
+      }
+      
+      if (relevantSegments.length === 0) {
+        // Fallback to descent time if no segments found
+        currentTime = descentStart + (descentEnd - descentStart) * positionInDescent
+      } else {
+        // Map position through the relevant route segments
+        const totalSegmentTime = relevantSegments.reduce((sum, seg) => sum + seg.duration, 0)
+        const targetTime = totalSegmentTime * positionInDescent
         
-        cumulativeTime += descentDuration
+        let cumulativeTime = 0
+        currentTime = relevantSegments[0].start // fallback
+        
+        for (const segment of relevantSegments) {
+          if (cumulativeTime + segment.duration >= targetTime) {
+            const posInSegment = (targetTime - cumulativeTime) / segment.duration
+            currentTime = segment.start + segment.duration * posInSegment
+            break
+          }
+          cumulativeTime += segment.duration
+        }
       }
     }
     
@@ -842,10 +910,11 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
       const descentEnd = descent.ended_at ? new Date(descent.ended_at).getTime() : (sessionEndTime || Date.now())
       
       if (currentTime >= descentStart && currentTime <= descentEnd) {
-        // Update to show this descent
+        // Update to show this descent at bottom (but don't focus timeline - only update index)
         if (currentDescentIndex !== i) {
           setCurrentDescentIndex(i)
-          setSelectedDescent(descent.id)
+          // Don't set selectedDescent here - that causes the timeline to focus in
+          // selectedDescent should only be set when user explicitly clicks on a descent
         }
         break
       }
@@ -854,12 +923,19 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
   
   // Update map based on scrub position (only when scrubbing)
   useEffect(() => {
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/a0dd1b5e-6580-44ae-9b6f-c3dccc8fc69d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SessionView.tsx:830',message:'MARKER UPDATE EFFECT',data:{hasMap:!!map,isScrubbing,scrubPosition,locationHistoryCount:locationHistory.length,timelineStartTime,timelineEndTime},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'MARKER'})}).catch(()=>{});
+    // #endregion
+    
     if (!map || !isScrubbing || scrubPosition === null || locationHistory.length === 0 || timelineStartTime === null || timelineEndTime === null) {
       // Clean up when not scrubbing
       if (!isScrubbing && scrubberMarkerRef.current) {
         map?.removeLayer(scrubberMarkerRef.current)
         scrubberMarkerRef.current = null
       }
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/a0dd1b5e-6580-44ae-9b6f-c3dccc8fc69d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SessionView.tsx:843',message:'MARKER UPDATE EARLY RETURN',data:{reason:!map?'no map':!isScrubbing?'not scrubbing':scrubPosition===null?'no scrub position':locationHistory.length===0?'no location history':timelineStartTime===null?'no start time':'no end time'},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'MARKER'})}).catch(()=>{});
+      // #endregion
       return
     }
     
@@ -885,76 +961,80 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
     scrubberMarkerRef.current = L.marker([location.latitude, location.longitude], { icon })
       .addTo(map)
     
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/a0dd1b5e-6580-44ae-9b6f-c3dccc8fc69d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SessionView.tsx:855',message:'MARKER PLACED',data:{lat:location.latitude,lng:location.longitude,scrubPosition},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'MARKER'})}).catch(()=>{});
+    // #endregion
+    
     // Pan to location smoothly
     map.panTo([location.latitude, location.longitude], { duration: 0.3 })
-    
-    // Show descents that are active at this time
-    // Calculate current time based on whether we're in compressed or selected mode
-    let currentTime: number
-    if (selectedDescent) {
-      currentTime = timelineStartTime + (timelineEndTime - timelineStartTime) * scrubPosition
-    } else {
-      // When showing compressed timeline, map scrub position to actual descent time
-      let cumulativeTime = 0
-      const targetTime = totalDescentTime * scrubPosition
-      
-      const firstDescent = sessionData.descentSessions[0]
-      currentTime = firstDescent ? new Date(firstDescent.started_at).getTime() : timelineStartTime
-      
-      for (const descent of sessionData.descentSessions) {
-        const descentStart = new Date(descent.started_at).getTime()
-        const descentEnd = descent.ended_at ? new Date(descent.ended_at).getTime() : (sessionEndTime || Date.now())
-        const descentDuration = descentEnd - descentStart
-        
-        if (cumulativeTime + descentDuration >= targetTime) {
-          const positionInDescent = (targetTime - cumulativeTime) / descentDuration
-          currentTime = descentStart + (descentEnd - descentStart) * positionInDescent
-          break
-        }
-        
-        cumulativeTime += descentDuration
-      }
-    }
-    
-    // Clear previous visible descent layers
-    visibleDescentLayersRef.current.forEach(layer => map.removeLayer(layer))
-    visibleDescentLayersRef.current = []
-    
-    // Show descents that overlap with current time
-    // When showing compressed timeline, only show the descent we're currently in
-    for (const descent of sessionData.descentSessions) {
-      const descentStart = new Date(descent.started_at).getTime()
-      const descentEnd = descent.ended_at ? new Date(descent.ended_at).getTime() : (sessionEndTime || Date.now())
-      
-      if (currentTime >= descentStart && currentTime <= descentEnd) {
-        // Find segments for this descent
-        const descentSegments: number[][][] = []
-        for (const segmentData of routeSegmentsWithTimestampsRef.current) {
-          const hasOverlap = segmentData.timestamps.some(timestamp => {
-            const time = new Date(timestamp).getTime()
-            return time >= descentStart && time <= descentEnd
-          })
-          
-          if (hasOverlap) {
-            const leafletCoords = segmentData.coords.map(coord => [coord[1], coord[0]] as [number, number])
-            descentSegments.push(leafletCoords)
-          }
-        }
-        
-        // Draw descent segments
-        for (const segment of descentSegments) {
-          const descentLine = L.polyline(segment, {
-            color: '#f97316',
-            weight: 3,
-            opacity: 1,
-            dashArray: '5, 5',
-            pane: 'completionPane'
-          }).addTo(map)
-          visibleDescentLayersRef.current.push(descentLine)
-        }
-      }
-    }
   }, [map, isScrubbing, scrubPosition, locationHistory, timelineStartTime, timelineEndTime, sessionData.descentSessions])
+  
+  // Show the FULL route in purple when scrolling (don't filter by descent)
+  // The descent shown at the bottom changes based on scrub position, but we show the full route
+  useEffect(() => {
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/a0dd1b5e-6580-44ae-9b6f-c3dccc8fc69d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SessionView.tsx:891',message:'PURPLE LINE EFFECT ENTRY',data:{hasMap:!!map,selectedDescent,routeSegmentsCount:routeSegmentsWithTimestampsRef.current.length,descentSessionsCount:sessionData.descentSessions.length,visibleDescentLayersCount:visibleDescentLayersRef.current.length,routeSegmentsLoaded},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'PURPLE_DRAW'})}).catch(()=>{});
+    // #endregion
+    
+    if (!map || selectedDescent || !routeSegmentsLoaded || routeSegmentsWithTimestampsRef.current.length === 0 || sessionData.descentSessions.length === 0) {
+      // Clear visible descent layers when a descent is selected (it will use highlighted layers instead)
+      if (selectedDescent) {
+        visibleDescentLayersRef.current.forEach(layer => map?.removeLayer(layer))
+        visibleDescentLayersRef.current = []
+        lastRenderedDescentIndexRef.current = null
+      }
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/a0dd1b5e-6580-44ae-9b6f-c3dccc8fc69d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SessionView.tsx:904',message:'PURPLE LINE EARLY RETURN',data:{reason:!map?'no map':selectedDescent?'has selectedDescent':!routeSegmentsLoaded?'route segments not loaded yet':routeSegmentsWithTimestampsRef.current.length===0?'no route segments':'no descent sessions'},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'PURPLE_DRAW'})}).catch(()=>{});
+      // #endregion
+      return
+    }
+    
+    // Only draw once - skip if already rendered
+    if (visibleDescentLayersRef.current.length > 0) {
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/a0dd1b5e-6580-44ae-9b6f-c3dccc8fc69d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SessionView.tsx:912',message:'PURPLE LINE ALREADY RENDERED',data:{visibleLayersCount:visibleDescentLayersRef.current.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'PURPLE_DRAW'})}).catch(()=>{});
+      // #endregion
+      return
+    }
+    
+    const L = (window as any).L
+    if (!L) return
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/a0dd1b5e-6580-44ae-9b6f-c3dccc8fc69d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SessionView.tsx:923',message:'DRAWING PURPLE LINES',data:{totalSegments:routeSegmentsWithTimestampsRef.current.length,segmentSizes:routeSegmentsWithTimestampsRef.current.map(s=>({coordCount:s.coords.length,timestampCount:s.timestamps.length}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'PURPLE_DRAW'})}).catch(()=>{});
+    // #endregion
+      
+    // Draw ALL route segments in purple (same path as background route, just different color)
+    // This allows the user to scrub through the entire path
+    // The descent shown at the bottom changes based on scrub position
+    let segmentIndex = 0
+    for (const segmentData of routeSegmentsWithTimestampsRef.current) {
+      const leafletCoords = segmentData.coords.map(coord => [coord[1], coord[0]] as [number, number])
+      
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/a0dd1b5e-6580-44ae-9b6f-c3dccc8fc69d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SessionView.tsx:931',message:'DRAWING PURPLE SEGMENT',data:{segmentIndex,coordCount:leafletCoords.length,firstCoord:leafletCoords[0],lastCoord:leafletCoords[leafletCoords.length-1]},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'PURPLE_DRAW'})}).catch(()=>{});
+      // #endregion
+      
+      const descentLine = L.polyline(leafletCoords, {
+        color: '#9333ea', // Purple color to distinguish from orange background route
+        weight: 4, // Slightly thicker than background route to make it stand out
+        opacity: 1,
+        dashArray: '5, 5',
+        smoothFactor: 1,
+        pane: 'completionPane'
+      }).addTo(map)
+      descentLine.bringToFront()
+      visibleDescentLayersRef.current.push(descentLine)
+      segmentIndex++
+    }
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/a0dd1b5e-6580-44ae-9b6f-c3dccc8fc69d',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SessionView.tsx:949',message:'PURPLE LINES DRAWN COMPLETE',data:{totalSegmentsDrawn:segmentIndex,visibleLayersCount:visibleDescentLayersRef.current.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'PURPLE_DRAW'})}).catch(()=>{});
+    // #endregion
+    
+    // Mark as rendered
+    lastRenderedDescentIndexRef.current = 0
+  }, [map, selectedDescent, sessionData.descentSessions, routeSegmentsLoaded])
   
   // Cleanup scrubber marker on unmount
   useEffect(() => {
@@ -1068,23 +1148,12 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
             onTouchMove={handleScrubberTouchMove}
             onTouchEnd={handleScrubberTouchEnd}
           >
-            {/* Descent markers on timeline - ONLY descents, compressed with no gaps */}
-            {!selectedDescent && totalDescentTime > 0 && sessionData.descentSessions.map((descent, idx) => {
-              const descentStart = new Date(descent.started_at).getTime()
-              const descentEnd = descent.ended_at ? new Date(descent.ended_at).getTime() : (sessionEndTime || Date.now())
-              const descentDuration = descentEnd - descentStart
-              
-              // Calculate cumulative position (compressed, no gaps)
-              let cumulativeTime = 0
-              for (let i = 0; i < idx; i++) {
-                const prevDescent = sessionData.descentSessions[i]
-                const prevStart = new Date(prevDescent.started_at).getTime()
-                const prevEnd = prevDescent.ended_at ? new Date(prevDescent.ended_at).getTime() : (sessionEndTime || Date.now())
-                cumulativeTime += (prevEnd - prevStart)
-              }
-              
-              const startPosition = cumulativeTime / totalDescentTime
-              const height = (descentDuration / totalDescentTime) * 100
+            {/* Descent markers on timeline - stretched evenly to fill the entire timeline bar */}
+            {!selectedDescent && sessionData.descentSessions.map((descent, idx) => {
+              // Stretch all descents evenly across the timeline (each gets equal space)
+              const totalDescents = sessionData.descentSessions.length
+              const startPosition = idx / totalDescents
+              const height = (1 / totalDescents) * 100
               const isFirst = idx === 0
               
               return (
@@ -1372,7 +1441,13 @@ export default function SessionView({ sessionId, sessionData, skiFeatures, map }
             {sessionData.descentSessions.map((_, idx) => (
               <button
                 key={idx}
-                onClick={() => setCurrentDescentIndex(idx)}
+                onClick={() => {
+                  // When user clicks on descent indicator, focus in on that descent
+                  const descent = sessionData.descentSessions[idx]
+                  if (descent) {
+                    setSelectedDescent(descent.id)
+                  }
+                }}
                 className={`h-1 rounded-full transition-all ${
                   idx === currentDescentIndex 
                     ? 'bg-white w-6' 
