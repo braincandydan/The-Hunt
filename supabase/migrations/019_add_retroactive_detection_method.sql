@@ -10,3 +10,4 @@ ALTER TABLE run_completions
   ADD CONSTRAINT run_completions_detection_method_check 
   CHECK (detection_method IN ('gps_proximity', 'manual', 'qr_scan', 'retroactive_detection'));
 
+

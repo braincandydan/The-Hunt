@@ -56,3 +56,4 @@ $$ LANGUAGE plpgsql;
 -- Run the recalculation
 SELECT recalculate_descent_session_times();
 
+
