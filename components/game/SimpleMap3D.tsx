@@ -95,35 +95,16 @@ function geoJsonToSimpleSceneCoords(
   return [x, y, z]
 }
 
-// Helper to calculate Voronoi cell size for a point
-function calculateVoronoiCellSize(
-  point: { x: number; z: number },
-  allPoints: Array<{ x: number; z: number }>
-): number {
-  // Find nearest neighbor distance (approximates cell size)
-  let minDist = Infinity
-  allPoints.forEach(p => {
-    if (p.x === point.x && p.z === point.z) return
-    const dist = Math.sqrt((p.x - point.x) ** 2 + (p.z - point.z) ** 2)
-    if (dist < minDist) {
-      minDist = dist
-    }
-  })
-  // Cell size is roughly 2x the distance to nearest neighbor
-  return minDist * 2
-}
 
 // Component to render a single ski trail/run in 3D using elevation from coordinates
 function SimpleTrail3D({
   feature,
   center,
-  elevationScale,
-  voronoiCellSizes
+  elevationScale
 }: {
   feature: SkiFeature
   center: [number, number]
   elevationScale: number
-  voronoiCellSizes?: Map<string, number> // Map of "x,z" -> cell size
 }) {
   const [tubeGeometry, setTubeGeometry] = useState<THREE.TubeGeometry | null>(null)
   const [midpoint, setMidpoint] = useState<THREE.Vector3 | null>(null)
@@ -140,8 +121,8 @@ function SimpleTrail3D({
 
   // Get color based on type and difficulty
   const getColor = () => {
-    if (feature.type === 'lift') return '#374151' // Dark gray for lifts
-    if (feature.type === 'boundary') return '#dc2626' // Red for boundaries
+    if (feature.type === 'lift') return '#dc2626' // Red for lifts
+    if (feature.type === 'boundary') return '#ec4899' // Pink for boundaries
     if (feature.type === 'road') return '#78716c' // Stone color for roads
     if (feature.difficulty) return difficultyColors[feature.difficulty] || '#6b7280'
     return '#6b7280' // Default gray
@@ -269,7 +250,10 @@ function SimpleTrail3D({
 
       // Use simple line geometry instead of tubes to prevent WebGL context loss
       // This is much lighter than TubeGeometry
-      const lineGeometry = new THREE.BufferGeometry().setFromPoints(points)
+      // Add small Y offset to ensure trails stay on top of mesh
+      const yOffset = feature.type === 'lift' ? 5 : 3 // Lifts higher, trails slightly above
+      const offsetPoints = points.map(p => new THREE.Vector3(p.x, p.y + yOffset, p.z))
+      const lineGeometry = new THREE.BufferGeometry().setFromPoints(offsetPoints)
       
       // Store as tubeGeometry for compatibility, but it's actually a line
       setTubeGeometry(lineGeometry as any)
@@ -288,265 +272,26 @@ function SimpleTrail3D({
     return () => {
       // Cleanup is handled by React Three Fiber automatically
     }
-  }, [feature, center, elevationScale, voronoiCellSizes])
+  }, [feature, center, elevationScale])
 
   if (!tubeGeometry) return null
 
-  // Use variable width if Voronoi cell sizes are provided
-  if (voronoiCellSizes && voronoiCellSizes.size > 0) {
-    // Extract points from geometry
-    const positions = tubeGeometry.getAttribute('position')
-    if (!positions) return null
-    
-    const allPoints: THREE.Vector3[] = []
-    for (let i = 0; i < positions.count; i++) {
-      allPoints.push(new THREE.Vector3(
-        positions.getX(i),
-        positions.getY(i),
-        positions.getZ(i)
-      ))
-    }
-
-    if (allPoints.length < 2) return null
-
-    // Pre-compute parsed cell size coordinates for faster lookup (only once)
-    const cellSizeCoords: Array<{ x: number; z: number; size: number }> = []
-    voronoiCellSizes.forEach((size, key) => {
-      const [xStr, zStr] = key.split(',')
-      cellSizeCoords.push({ x: parseFloat(xStr), z: parseFloat(zStr), size })
-    })
-
-    // Helper to find nearest cell size for a point (optimized with search radius and early exit)
-    const findNearestCellSize = (point: THREE.Vector3): number | null => {
-      // First try exact match
-      const exactKey = `${point.x.toFixed(2)},${point.z.toFixed(2)}`
-      const exactMatch = voronoiCellSizes.get(exactKey)
-      if (exactMatch !== undefined) return exactMatch
-
-      // Find nearest point in the cell sizes (with early exit for close matches)
-      let nearestDist = Infinity
-      let nearestSize: number | null = null
-      const SEARCH_RADIUS = 100 // Only search within 100 units
-      
-      for (const { x, z, size } of cellSizeCoords) {
-        const dist = Math.sqrt((point.x - x) ** 2 + (point.z - z) ** 2)
-        if (dist < nearestDist && dist < SEARCH_RADIUS) {
-          nearestDist = dist
-          nearestSize = size
-          // Early exit if we find a very close match
-          if (dist < 10) break
-        }
-      }
-
-      return nearestSize
-    }
-
-    // Find min/max cell sizes for normalization
-    let minCellSize = Infinity
-    let maxCellSize = -Infinity
-    const cellSizeValues: number[] = []
-    allPoints.forEach((point) => {
-      const cellSize = findNearestCellSize(point)
-      if (cellSize !== null) {
-        cellSizeValues.push(cellSize)
-        minCellSize = Math.min(minCellSize, cellSize)
-        maxCellSize = Math.max(maxCellSize, cellSize)
-      }
-    })
-
-    // If no valid cell sizes found, fall back to default
-    if (minCellSize === Infinity || maxCellSize === -Infinity || cellSizeValues.length === 0) {
-      console.warn('No valid Voronoi cell sizes found for trail, using default width')
-      return (
-        <group frustumCulled>
-          <primitive 
-            object={new THREE.Line(tubeGeometry, new THREE.LineBasicMaterial({ 
-              color, 
-              linewidth: feature.type === 'lift' ? 2 : 4 
-            }))} 
-            frustumCulled
-          />
-        </group>
-      )
-    }
-
-    // Create a seamless tube with smoothly varying radius using custom geometry
-    const baseRadius = feature.type === 'lift' ? 1 : 2
-    const minRadius = baseRadius * 0.5
-    const maxRadius = baseRadius * 9
-
-    // Calculate radius for each point
-    let pointRadii: number[] = []
-    for (let i = 0; i < allPoints.length; i++) {
-      const point = allPoints[i]
-      const cellSize = findNearestCellSize(point)
-      
-      // Normalize cell size to 0-1 range, then map to radius range
-      const normalized = cellSize !== null && maxCellSize > minCellSize
-        ? (cellSize - minCellSize) / (maxCellSize - minCellSize)
-        : 0.5
-      const radius = minRadius + (maxRadius - minRadius) * normalized
-      pointRadii.push(radius)
-    }
-
-    // Apply Gaussian smoothing to radius values for ultra-smooth transitions
-    const smoothedRadii: number[] = []
-    const kernelSize = 5
-    const sigma = kernelSize / 3
-    
-    for (let i = 0; i < pointRadii.length; i++) {
-      let sum = 0
-      let weightSum = 0
-      
-      for (let j = -kernelSize; j <= kernelSize; j++) {
-        const idx = i + j
-        if (idx >= 0 && idx < pointRadii.length) {
-          const weight = Math.exp(-(j * j) / (2 * sigma * sigma))
-          sum += pointRadii[idx] * weight
-          weightSum += weight
-        }
-      }
-      
-      smoothedRadii.push(sum / weightSum)
-    }
-    pointRadii = smoothedRadii
-
-    // Create a smooth CatmullRom curve through all points
-    const curve = new THREE.CatmullRomCurve3(allPoints, false, 'centripetal')
-    
-    // Create a single seamless tube geometry with varying radius
-    const radialSegments = 8 // Number of vertices around the tube
-    const tubularSegments = Math.min(300, allPoints.length * 10) // Number of cross-sections along the curve
-    
-    const vertices: number[] = []
-    const normals: number[] = []
-    const indices: number[] = []
-    
-    // Helper to get radius at any point along the curve
-    const getRadiusAtT = (t: number): number => {
-      const pointIndex = t * (allPoints.length - 1)
-      const index1 = Math.floor(pointIndex)
-      const index2 = Math.min(Math.ceil(pointIndex), allPoints.length - 1)
-      const localT = pointIndex - index1
-      
-      // Cubic interpolation for smooth radius
-      const r0 = pointRadii[Math.max(0, index1 - 1)]
-      const r1 = pointRadii[index1]
-      const r2 = pointRadii[Math.min(index2, pointRadii.length - 1)]
-      const r3 = pointRadii[Math.min(index2 + 1, pointRadii.length - 1)]
-      
-      const tt = localT * localT
-      const ttt = tt * localT
-      const h1 = 2 * ttt - 3 * tt + 1
-      const h2 = -2 * ttt + 3 * tt
-      const h3 = ttt - 2 * tt + localT
-      const h4 = ttt - tt
-      
-      const m0 = (r2 - r0) * 0.5
-      const m1 = (r3 - r1) * 0.5
-      
-      return h1 * r1 + h2 * r2 + h3 * m0 + h4 * m1
-    }
-    
-    // Build the tube geometry
-    for (let i = 0; i <= tubularSegments; i++) {
-      const t = i / tubularSegments
-      const radius = getRadiusAtT(t)
-      
-      // Get position and tangent along the curve
-      const position = curve.getPoint(t)
-      const tangent = curve.getTangent(t).normalize()
-      
-      // Create a coordinate system perpendicular to the tangent
-      const normal = new THREE.Vector3(0, 1, 0)
-      const binormal = new THREE.Vector3()
-      if (Math.abs(tangent.y) > 0.9) {
-        normal.set(1, 0, 0)
-      }
-      binormal.crossVectors(tangent, normal).normalize()
-      normal.crossVectors(binormal, tangent).normalize()
-      
-      // Create vertices around the circle at this cross-section
-      for (let j = 0; j <= radialSegments; j++) {
-        const u = (j / radialSegments) * Math.PI * 2
-        const cos = Math.cos(u)
-        const sin = Math.sin(u)
-        
-        // Calculate vertex position
-        const vertex = new THREE.Vector3()
-        vertex.addScaledVector(normal, cos * radius)
-        vertex.addScaledVector(binormal, sin * radius)
-        vertex.add(position)
-        
-        vertices.push(vertex.x, vertex.y, vertex.z)
-        
-        // Calculate normal
-        const vertexNormal = new THREE.Vector3()
-        vertexNormal.addScaledVector(normal, cos)
-        vertexNormal.addScaledVector(binormal, sin)
-        normals.push(vertexNormal.x, vertexNormal.y, vertexNormal.z)
-      }
-    }
-    
-    // Create indices for the tube faces
-    for (let i = 0; i < tubularSegments; i++) {
-      for (let j = 0; j < radialSegments; j++) {
-        const a = i * (radialSegments + 1) + j
-        const b = a + 1
-        const c = (i + 1) * (radialSegments + 1) + j
-        const d = c + 1
-        
-        // Two triangles per quad
-        indices.push(a, b, c)
-        indices.push(b, d, c)
-      }
-    }
-    
-    // Create the geometry
-    const geometry = new THREE.BufferGeometry()
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
-    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3))
-    geometry.setIndex(indices)
-    
-    return (
-      <mesh geometry={geometry} frustumCulled>
-        <meshBasicMaterial color={color} />
-      </mesh>
-    )
-  }
-
-  // Default: single line with fixed width
+  // Render as simple line
   return (
-    <group frustumCulled>
-      {/* Use Line instead of Mesh - MUCH lighter for WebGL */}
+    <group frustumCulled renderOrder={1}>
       <primitive 
         object={new THREE.Line(tubeGeometry, new THREE.LineBasicMaterial({ 
           color, 
-          linewidth: feature.type === 'lift' ? 2 : 4 
+          linewidth: feature.type === 'lift' ? 2 : 4,
+          depthTest: true,
+          depthWrite: false // Don't write to depth buffer to avoid z-fighting
         }))} 
         frustumCulled
       />
-      {/* Labels temporarily disabled to reduce WebGL load */}
-      {/* {feature.name && midpoint && (
-        <Billboard position={[midpoint.x, midpoint.y + 30, midpoint.z]} follow={true}>
-          <mesh position={[0, 0, -0.5]}>
-            <planeGeometry args={[feature.name.length * 4 + 16, 12]} />
-            <meshBasicMaterial color="#ffffff" transparent opacity={0.9} />
-          </mesh>
-          <Text
-            fontSize={4.5}
-            color={color}
-            anchorX="center"
-            anchorY="middle"
-            fontWeight="bold"
-          >
-            {feature.name}
-          </Text>
-        </Billboard>
-      )} */}
     </group>
   )
 }
+
 
 // Camera controller that positions camera based on all trails
 // Locks target to the highest point and allows rotation around it
@@ -556,14 +301,14 @@ function CameraController({
   controlsRef,
   elevationScale,
   offsetY = -250,
-  screenTargetPosition = [0.5, 0.5] // Normalized screen coordinates [x, y] where 0.5, 0.5 is center
+  screenTargetPosition = [0.5, 0.5] // [x, y] - only y (vertical) is used, x is ignored (kept centered)
 }: { 
   skiFeatures: SkiFeature[]
   center: [number, number]
   controlsRef: React.MutableRefObject<any>
   elevationScale: number
   offsetY?: number // Vertical offset to apply to tracking point (negative values lower the point)
-  screenTargetPosition?: [number, number] // Normalized screen position [0-1, 0-1] where target should appear
+  screenTargetPosition?: [number, number] // [x, y] - only y controls vertical screen position (0-1), where 0.5 is center
 }) {
   const { camera, size } = useThree()
   const [highestPoint, setHighestPoint] = useState<THREE.Vector3 | null>(null)
@@ -670,17 +415,17 @@ function CameraController({
     if (!highestPoint || !bounds) return
 
     try {
-      const size = new THREE.Vector3()
-      bounds.getSize(size)
+      const boundsSize = new THREE.Vector3()
+      bounds.getSize(boundsSize)
 
       // Validate bounds
-      if (!isFinite(size.x) || !isFinite(size.y) || !isFinite(size.z) ||
+      if (!isFinite(boundsSize.x) || !isFinite(boundsSize.y) || !isFinite(boundsSize.z) ||
           !isFinite(highestPoint.x) || !isFinite(highestPoint.y) || !isFinite(highestPoint.z)) {
         console.warn('Invalid camera bounds, using defaults')
         return
       }
 
-      const maxDim = Math.max(size.x, size.y, size.z)
+      const maxDim = Math.max(boundsSize.x, boundsSize.y, boundsSize.z)
       if (maxDim === 0 || !isFinite(maxDim)) {
         console.warn('Zero or invalid max dimension, using default camera position')
         return
@@ -690,35 +435,118 @@ function CameraController({
 
       // Calculate tracking point by offsetting the highest point vertically
       const offsetTrackingPoint = highestPoint.clone()
-      offsetTrackingPoint.y -= offsetY // Subtract offsetY to lower the tracking point
+      offsetTrackingPoint.y -= offsetY
       setTrackingPoint(offsetTrackingPoint)
 
       // Calculate height difference between tracking point and highest point
       const heightDifference = highestPoint.y - offsetTrackingPoint.y
 
-      // Position camera to look at the OFFSET TRACKING POINT
-      // Position at an angle to better see the 3D shape
-      // Adjust camera height to account for the height difference
-      camera.position.set(
-        offsetTrackingPoint.x + distance * 0.8,
-        offsetTrackingPoint.y + distance * 0.8 + heightDifference * 1.5 + 1500, // Add some height clearance
-        offsetTrackingPoint.z + distance * 0.8
-      )
+      // Position camera at the standard position
+      const baseDistance = distance * 0.8
+      const cameraX = offsetTrackingPoint.x + baseDistance
+      const cameraY = offsetTrackingPoint.y + baseDistance + heightDifference * 1.5 + 1500
+      const cameraZ = offsetTrackingPoint.z + baseDistance
+      
+      camera.position.set(cameraX, cameraY, cameraZ)
+      
+      // First, make camera look at the tracking point to establish proper orientation
       camera.lookAt(offsetTrackingPoint)
+      camera.updateMatrixWorld()
+      camera.updateProjectionMatrix()
 
-      if (controlsRef.current) {
-        // Lock target to the offset tracking point (not the highest point)
-        controlsRef.current.target.copy(offsetTrackingPoint)
-        controlsRef.current.update()
+      // Calculate desired screen position in normalized device coordinates (NDC)
+      // screenTargetPosition: [x, y] where y controls vertical position (0-1)
+      // Only use vertical position (y), keep horizontal centered
+      const ndcX = 0  // Always keep horizontal centered
+      const ndcY = (0.5 - screenTargetPosition[1]) * 2   // -1 (bottom) to 1 (top), Y is flipped
+
+      // Calculate the distance from camera to tracking point
+      const directionToTarget = new THREE.Vector3().subVectors(offsetTrackingPoint, camera.position)
+      const distanceToTarget = directionToTarget.length()
+
+      // Use Three.js projection to convert screen coordinates to world space
+      if ('fov' in camera) {
+        // Create a vector representing the desired screen position in NDC
+        const screenPos = new THREE.Vector3(ndcX, ndcY, 0.5) // Z=0.5 means "at the target distance"
+        
+        // Unproject to get world position at the target distance
+        // We'll use the camera's projection matrix to convert NDC to world space
+        const fov = (camera as THREE.PerspectiveCamera).fov * (Math.PI / 180)
+        const aspect = size.width / size.height
+        const near = camera.near
+        const far = camera.far
+        
+        // Calculate the world position at the target distance
+        // Using the camera's view frustum to convert NDC to world coordinates
+        const verticalFov = fov
+        const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * aspect)
+        
+        // Calculate world offset at the target distance
+        const worldOffsetX = Math.tan(horizontalFov / 2) * distanceToTarget * ndcX
+        const worldOffsetY = Math.tan(verticalFov / 2) * distanceToTarget * ndcY
+
+        // Use the camera's quaternion (set by lookAt) to get screen-space direction vectors
+        // The camera's local X axis (1,0,0) is screen right, Y axis (0,1,0) is screen up
+        const cameraRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion).normalize()
+        const cameraUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion).normalize()
+
+        // Calculate offset: to make target appear HIGHER on screen, we move OrbitControls target DOWN
+        // Only apply the Y (vertical) component to avoid X/Z movement
+        // Scale the Y component of cameraUp by the offset amount
+        const targetOffset = new THREE.Vector3(0, -worldOffsetY * cameraUp.y, 0)  // Only move in world Y axis
+
+        // Calculate the adjusted target for OrbitControls
+        const adjustedTarget = offsetTrackingPoint.clone().add(targetOffset)
+
+        if (controlsRef.current) {
+          // Set OrbitControls target to the adjusted target
+          controlsRef.current.target.copy(adjustedTarget)
+          controlsRef.current.update()
+          
+          // Lock horizontal position for vertical-only panning
+          setLockedX(adjustedTarget.x)
+          setLockedZ(adjustedTarget.z)
+        }
+      } else {
+        // Fallback: just set to tracking point if not perspective camera
+        if (controlsRef.current) {
+          controlsRef.current.target.copy(offsetTrackingPoint)
+          controlsRef.current.update()
+          
+          // Lock horizontal position for vertical-only panning
+          setLockedX(offsetTrackingPoint.x)
+          setLockedZ(offsetTrackingPoint.z)
+        }
       }
     } catch (error) {
       console.error('Error positioning camera:', error)
     }
-  }, [highestPoint, bounds, camera, controlsRef, offsetY])
+  }, [highestPoint, bounds, camera, controlsRef, offsetY, screenTargetPosition, size])
 
-  // Update current target position in real-time to track where camera is actually pointing
+  // Store initial target X and Z to lock horizontal panning
+  const [lockedX, setLockedX] = useState<number | null>(null)
+  const [lockedZ, setLockedZ] = useState<number | null>(null)
+
+  // Update current target position and constrain horizontal panning
   useFrame(() => {
     if (controlsRef.current && controlsRef.current.target) {
+      if (lockedX !== null && lockedZ !== null) {
+        // Get the current target position
+        const target = controlsRef.current.target
+        
+        // Calculate how much the target has moved from the locked position
+        const deltaX = target.x - lockedX
+        const deltaZ = target.z - lockedZ
+        
+        // If there's horizontal movement, project it onto the vertical axis
+        // We want to allow vertical (Y) movement but prevent horizontal (X, Z) movement
+        // So we reset X and Z to locked values, but keep Y as-is (allowing vertical panning)
+        target.x = lockedX
+        target.z = lockedZ
+        // Y remains unchanged, allowing vertical panning
+        
+        controlsRef.current.update()
+      }
       setCurrentTarget(controlsRef.current.target.clone())
     }
   })
@@ -773,102 +601,7 @@ function CameraController({
 }
 
 // Visual Focus Plane Indicator - shows where the focus distance is
-function FocusPlaneIndicator({ 
-  focusDistance, 
-  camera, 
-  target,
-  show = false 
-}: { 
-  focusDistance: number
-  camera: THREE.Camera
-  target: THREE.Vector3
-  show?: boolean
-}) {
-  const planeRef = useRef<THREE.Mesh>(null)
-  const [planePosition, setPlanePosition] = useState<THREE.Vector3>(new THREE.Vector3())
-
-  useFrame(() => {
-    if (!planeRef.current || !camera || !target) return
-
-    // Calculate position of focus plane
-    // The focus plane is at focusDistance from the camera, in the direction of the target
-    const cameraPos = camera.position.clone()
-    const direction = target.clone().sub(cameraPos).normalize()
-    const focusPoint = cameraPos.clone().add(direction.multiplyScalar(focusDistance))
-    
-    planeRef.current.position.copy(focusPoint)
-    
-    // Orient the plane to face the camera
-    planeRef.current.lookAt(cameraPos)
-    planeRef.current.rotateX(Math.PI / 2) // Rotate to be horizontal
-    
-    setPlanePosition(focusPoint)
-  })
-
-  if (!show) return null
-
-  return (
-    <mesh ref={planeRef} renderOrder={-1}>
-      <planeGeometry args={[2000, 2000, 20, 20]} />
-      <meshBasicMaterial 
-        color="#00ff00" 
-        transparent 
-        opacity={0.3}
-        side={THREE.DoubleSide}
-        wireframe
-      />
-    </mesh>
-  )
-}
-
-// Depth of Field Controller - adjusts focus based on camera distance
-function DepthOfFieldController({ 
-  controlsRef,
-  showFocusPlane = false 
-}: { 
-  controlsRef: React.MutableRefObject<any>
-  showFocusPlane?: boolean
-}) {
-  const { camera } = useThree()
-  const [focusDistance, setFocusDistance] = useState(1000)
-  const [target, setTarget] = useState<THREE.Vector3>(new THREE.Vector3())
-
-  useFrame(() => {
-    if (!controlsRef.current || !camera) return
-
-    // Calculate focus distance based on camera distance from target
-    const targetPos = controlsRef.current.target
-    const cameraPos = camera.position
-    const distance = cameraPos.distanceTo(targetPos)
-    
-    // Set focus distance to be slightly in front of the target
-    // This keeps the center/runs in focus, with gradual blur for distant runs
-    const newFocusDistance = distance * 0.8
-    setFocusDistance(newFocusDistance)
-    setTarget(targetPos)
-  })
-
-  return (
-    <>
-      <EffectComposer>
-        <DepthOfField
-          focusDistance={focusDistance}
-          focalLength={0.07}
-          bokehScale={1}
-          height={480}
-        />
-      </EffectComposer>
-      {showFocusPlane && (
-        <FocusPlaneIndicator 
-          focusDistance={focusDistance} 
-          camera={camera} 
-          target={target}
-          show={showFocusPlane}
-        />
-      )}
-    </>
-  )
-}
+// REMOVED: FocusPlaneIndicator and DepthOfFieldController - unused features
 
 // Terrain mesh generated EXACTLY from ski run coordinates
 // Uses the actual run points as vertices - NO interpolation, NO guessing
@@ -881,9 +614,13 @@ function SimpleTerrainMesh({
   elevationOffset = 0, // How many units below runs the terrain should be
   tubeRadius = 6, // Radius of the run tubes (must match SimpleTrail3D)
   show = true, // Toggle terrain visibility
-  opacity = 0.7, // Terrain opacity (0-1)
+  opacity = 1, // Terrain opacity (0-1) - fully opaque
   wireframe = false, // Show as wireframe
-  color = '#8b7355' // Terrain color
+  color = '#ffffff', // Terrain color (white)
+  thickness = 0, // Thickness of terrain mesh (0 = flat, >0 = extruded downward)
+  extendEdges = 0, // Distance to extend boundary edges outward (0 = no extension, >0 = extend outward)
+  edgeColor = '#888888', // Color for peaks/edges/pointy parts
+  onGeometryReady // Callback when geometry is ready for export
 }: {
   skiFeatures: SkiFeature[]
   center: [number, number]
@@ -896,14 +633,27 @@ function SimpleTerrainMesh({
   opacity?: number
   wireframe?: boolean
   color?: string
+  thickness?: number
+  extendEdges?: number
+  edgeColor?: string
+  onGeometryReady?: (geometry: THREE.BufferGeometry) => void
 }) {
   const [terrainGeometry, setTerrainGeometry] = useState<THREE.BufferGeometry | null>(null)
+  // Simplified opacity - no animation for now to ensure visibility
+  const [animatedOpacity, setAnimatedOpacity] = useState(opacity)
+
+  // Update opacity when show or opacity prop changes
+  useEffect(() => {
+    setAnimatedOpacity(show ? opacity : 0)
+  }, [show, opacity])
 
   useEffect(() => {
     try {
-      // Collect EXACT run coordinate points - same logic as SimpleTrail3D
+      // Collect run coordinate points from trail features
       const runPoints: Array<{ x: number; z: number; y: number; runIndex: number; pointIndex: number }> = []
       const runPointArrays: Array<Array<{ x: number; z: number; y: number }>> = []
+
+      const trailFeatures = skiFeatures.filter(f => f.type === 'trail')
 
       skiFeatures.forEach((feature, featureIndex) => {
         if (!feature.geometry || !feature.geometry.coordinates || feature.type !== 'trail') return
@@ -969,40 +719,92 @@ function SimpleTerrainMesh({
           runPointsForThisRun.push(point)
         })
 
-        if (runPointsForThisRun.length > 0) {
-          runPointArrays.push(runPointsForThisRun)
-        }
-      })
-
-      if (runPoints.length === 0) return
-
-      // Build terrain mesh using Delaunay triangulation
-      // This creates an optimal triangulated surface from all run points
-      
-      // Collect unique points (deduplicate by x,z coordinates)
-      const uniquePoints: Array<{ x: number; z: number; y: number }> = []
-      const pointMap = new Map<string, number>() // "x,z" -> index in uniquePoints
-      
-      runPoints.forEach(point => {
-        const key = `${point.x.toFixed(4)},${point.z.toFixed(4)}`
-        if (!pointMap.has(key)) {
-          pointMap.set(key, uniquePoints.length)
-          uniquePoints.push({ x: point.x, z: point.z, y: point.y })
-        }
-      })
-
-      if (uniquePoints.length < 3) {
-        // Need at least 3 points for triangulation
-        return
+      if (runPointsForThisRun.length > 0) {
+        runPointArrays.push(runPointsForThisRun)
       }
+    })
+
+    if (runPoints.length === 0) {
+      console.warn('SimpleTerrainMesh: No run points collected')
+      return
+    }
+
+    // Build terrain mesh using Delaunay triangulation
+    // This creates an optimal triangulated surface from all run points
+    
+    // Add interpolation function
+    function interpolatePointsAlongTrail(
+      points: Array<{ x: number; z: number; y: number }>,
+      maxSegmentLength: number = 50 // Maximum distance between points
+    ): Array<{ x: number; z: number; y: number }> {
+      if (points.length < 2) return points
+      
+      const interpolated: Array<{ x: number; z: number; y: number }> = []
+      
+      for (let i = 0; i < points.length - 1; i++) {
+        const p1 = points[i]
+        const p2 = points[i + 1]
+        
+        interpolated.push(p1)
+        
+        const dist = Math.sqrt((p2.x - p1.x) ** 2 + (p2.z - p1.z) ** 2)
+        if (dist > maxSegmentLength) {
+          const segments = Math.ceil(dist / maxSegmentLength)
+          for (let j = 1; j < segments; j++) {
+            const t = j / segments
+            interpolated.push({
+              x: p1.x + (p2.x - p1.x) * t,
+              z: p1.z + (p2.z - p1.z) * t,
+              y: p1.y + (p2.y - p1.y) * t // Linear interpolation of elevation
+            })
+          }
+        }
+      }
+      
+      interpolated.push(points[points.length - 1])
+      return interpolated
+    }
+
+    // Subdivide long trail segments for denser mesh
+    // Lower value = more triangles, smoother mesh, fewer stretched triangles
+    const MAX_SEGMENT_LENGTH = 300 // Reduced from 300 for denser point distribution
+    
+    const interpolatedRunPoints: Array<{ x: number; z: number; y: number }> = []
+    runPointArrays.forEach(runPoints => {
+      interpolatedRunPoints.push(...interpolatePointsAlongTrail(runPoints, MAX_SEGMENT_LENGTH))
+    })
+
+    // Log interpolation results for debugging
+    const originalRunPointCount = runPoints.length
+    const interpolatedPointCount = interpolatedRunPoints.length
+
+    // Collect unique points (deduplicate by x,z coordinates) - USE INTERPOLATED POINTS
+    const uniquePoints: Array<{ x: number; z: number; y: number }> = []
+    const pointMap = new Map<string, number>() // "x,z" -> index in uniquePoints
+
+    // FIX: Use interpolatedRunPoints instead of runPoints
+    interpolatedRunPoints.forEach(point => {
+      const key = `${point.x.toFixed(4)},${point.z.toFixed(4)}`
+      if (!pointMap.has(key)) {
+        pointMap.set(key, uniquePoints.length)
+        uniquePoints.push({ x: point.x, z: point.z, y: point.y })
+      }
+    })
+
+    if (uniquePoints.length < 3) {
+      console.warn('SimpleTerrainMesh: Not enough unique points for triangulation', { uniquePointsCount: uniquePoints.length })
+      return
+    }
 
       // Limit number of points to prevent WebGL context loss
       // Delaunay triangulation creates ~2n triangles, so we need to be conservative
       // With simpler line geometry for runs, we can handle more terrain points
-      const MAX_POINTS = 3000 // Increased since runs are now lighter
+      // Increased limits to support interpolation
+      const MAX_POINTS = 6000 // Increased to support interpolated points
+      const MAX_POINTS_HARD_LIMIT = 15000 // Hard limit - skip terrain if exceeded
       
       // If we have too many points, skip terrain entirely to prevent crashes
-      if (uniquePoints.length > MAX_POINTS * 2) {
+      if (uniquePoints.length > MAX_POINTS_HARD_LIMIT) {
         console.warn(`Too many points (${uniquePoints.length}), skipping terrain mesh to prevent WebGL context loss`)
         setTerrainGeometry(null)
         return
@@ -1035,106 +837,511 @@ function SimpleTerrainMesh({
       }
 
       // Prepare 2D points array for Delaunay (x, z coordinates only)
-      // Delaunay works in 2D, then we use the y (elevation) from original points
-      // Format: array of [x, z] pairs
       const points2D: Array<[number, number]> = uniquePoints.map(point => [point.x, point.z])
 
-      // Validate points before triangulation
       if (points2D.length < 3) {
         console.warn('Not enough points for Delaunay triangulation')
         return
       }
 
-      // Check for duplicate points (Delaunay can fail with collinear or duplicate points)
-      const pointSet = new Set<string>()
-      const hasDuplicates = points2D.some(([x, z]) => {
-        const key = `${x.toFixed(6)},${z.toFixed(6)}`
-        if (pointSet.has(key)) return true
-        pointSet.add(key)
-        return false
-      })
-
-      if (hasDuplicates && points2D.length === pointSet.size) {
-        // All points are duplicates - can't triangulate
-        console.warn('All points are duplicates, cannot create terrain mesh')
-        return
-      }
-
+      // Perform Delaunay triangulation
       let delaunay: Delaunator<ArrayLike<number>>
       try {
-        // Perform Delaunay triangulation
         delaunay = Delaunator.from(points2D)
       } catch (error) {
         console.error('Delaunay triangulation failed:', error)
         return
       }
 
-      // Validate delaunay result
       if (!delaunay || !delaunay.triangles || delaunay.triangles.length === 0) {
         console.warn('Delaunay triangulation produced no triangles')
         return
       }
       
-      // Extract vertices and indices from Delaunay result
+      // Build vertices array from uniquePoints
       const vertices: number[] = []
-      const indices: number[] = []
-      
-      // Build vertices array with x, y (elevation), z
       uniquePoints.forEach(point => {
         vertices.push(point.x, point.y, point.z)
       })
       
-      // Delaunay returns triangles as indices into the points array
-      // Each triangle is represented by 3 consecutive indices
+      // Extract triangle indices - keep all valid triangles
+      // Edge subdivision will handle breaking up long edges later
+      const indices: number[] = []
+      const pointCount = uniquePoints.length
+      
       for (let i = 0; i < delaunay.triangles.length; i += 3) {
         const i0 = delaunay.triangles[i]
         const i1 = delaunay.triangles[i + 1]
         const i2 = delaunay.triangles[i + 2]
         
-        // Ensure valid triangle indices with bounds checking
-        if (i0 !== undefined && i1 !== undefined && i2 !== undefined &&
-            i0 >= 0 && i0 < uniquePoints.length &&
-            i1 >= 0 && i1 < uniquePoints.length &&
-            i2 >= 0 && i2 < uniquePoints.length &&
-            i0 !== i1 && i1 !== i2 && i0 !== i2) {
-          indices.push(i0, i1, i2)
+        // Basic validation only - keep all valid triangles
+        if (i0 === undefined || i1 === undefined || i2 === undefined ||
+            i0 < 0 || i0 >= pointCount ||
+            i1 < 0 || i1 >= pointCount ||
+            i2 < 0 || i2 >= pointCount ||
+            i0 === i1 || i1 === i2 || i0 === i2) {
+          continue
         }
+        
+        // Keep all valid triangles - edge subdivision will clean up long edges
+        indices.push(i0, i1, i2)
       }
 
       if (indices.length === 0) {
-        console.warn('No valid triangles generated from Delaunay triangulation')
+        console.warn('No valid triangles generated')
         return
       }
 
-      // Limit triangle count to prevent WebGL issues
-      // Each point can generate up to ~6 triangles in Delaunay, so we cap at a safe limit
-      // Increased since runs are now lighter (lines instead of tubes)
-      const MAX_TRIANGLES = 10000 // Increased from 5000
-      if (indices.length > MAX_TRIANGLES * 3) {
-        console.warn(`Too many triangles (${indices.length / 3}), limiting to ${MAX_TRIANGLES} for performance`)
-        indices.splice(MAX_TRIANGLES * 3)
-      }
-
-      // Create geometry from EXACT run points
-      try {
-        const geometry = new THREE.BufferGeometry()
-        geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
-        if (indices.length > 0) {
-          geometry.setIndex(indices)
+      // Subdivide long edges to break up straight lines
+      // Threshold for edge subdivision - edges longer than this will be subdivided
+      const EDGE_SUBDIVISION_THRESHOLD = 3000 // Subdivide edges longer than this
+      const MAX_SUBDIVISIONS = 2 // Maximum subdivisions per edge to prevent infinite loops
+      
+      let currentPoints = [...uniquePoints]
+      let currentIndices = [...indices]
+      let subdivisionCount = 0
+      
+      // Keep subdividing until no more long edges or max iterations reached
+      while (subdivisionCount < MAX_SUBDIVISIONS) {
+        const edgeMap = new Map<string, { v1: number; v2: number; length: number }>()
+        const edgeToTriangles = new Map<string, number[]>() // edge key -> array of triangle indices
+        
+        // Find all long edges and which triangles use them
+        for (let i = 0; i < currentIndices.length; i += 3) {
+          const v0 = currentIndices[i]
+          const v1 = currentIndices[i + 1]
+          const v2 = currentIndices[i + 2]
+          
+          const edges = [
+            [Math.min(v0, v1), Math.max(v0, v1)],
+            [Math.min(v1, v2), Math.max(v1, v2)],
+            [Math.min(v2, v0), Math.max(v2, v0)]
+          ]
+          
+          edges.forEach(([minIdx, maxIdx]) => {
+            const key = `${minIdx}-${maxIdx}`
+            const p1 = currentPoints[minIdx]
+            const p2 = currentPoints[maxIdx]
+            const length = Math.sqrt((p2.x - p1.x) ** 2 + (p2.z - p1.z) ** 2)
+            
+            if (length > EDGE_SUBDIVISION_THRESHOLD) {
+              if (!edgeMap.has(key)) {
+                edgeMap.set(key, { v1: minIdx, v2: maxIdx, length })
+                edgeToTriangles.set(key, [])
+              }
+              edgeToTriangles.get(key)!.push(i)
+            }
+          })
         }
         
-        // Only compute normals if we have a reasonable number of triangles
-        if (indices.length < 50000) {
-          geometry.computeVertexNormals()
+        if (edgeMap.size === 0) {
+          break // No more long edges to subdivide
         }
+        
+        // Subdivide each long edge
+        const newPoints = [...currentPoints]
+        const newIndices: number[] = []
+        const edgeMidpoints = new Map<string, number>() // edge key -> new midpoint vertex index
+        
+        // Create midpoints for long edges
+        edgeMap.forEach((edge, key) => {
+          const p1 = currentPoints[edge.v1]
+          const p2 = currentPoints[edge.v2]
+          
+          // Create midpoint with interpolated elevation
+          const midpoint = {
+            x: (p1.x + p2.x) / 2,
+            y: (p1.y + p2.y) / 2,
+            z: (p1.z + p2.z) / 2
+          }
+          
+          const midpointIndex = newPoints.length
+          newPoints.push(midpoint)
+          edgeMidpoints.set(key, midpointIndex)
+        })
+        
+        // Rebuild triangles, splitting those with subdivided edges
+        for (let i = 0; i < currentIndices.length; i += 3) {
+          const v0 = currentIndices[i]
+          const v1 = currentIndices[i + 1]
+          const v2 = currentIndices[i + 2]
+          
+          const edges: Array<{ key: string; v1: number; v2: number }> = [
+            { key: `${Math.min(v0, v1)}-${Math.max(v0, v1)}`, v1: v0, v2: v1 },
+            { key: `${Math.min(v1, v2)}-${Math.max(v1, v2)}`, v1: v1, v2: v2 },
+            { key: `${Math.min(v2, v0)}-${Math.max(v2, v0)}`, v1: v2, v2: v0 }
+          ]
+          
+          const subdividedEdges = edges.filter(e => edgeMidpoints.has(e.key))
+          
+          if (subdividedEdges.length === 0) {
+            // No subdivided edges, keep triangle as-is
+            newIndices.push(v0, v1, v2)
+          } else if (subdividedEdges.length === 1) {
+            // One edge subdivided - split triangle into 2
+            const edge = subdividedEdges[0]
+            const vc = edges.find(e => e.key !== edge.key)!.v1 // The vertex not on the subdivided edge
+            const midpoint = edgeMidpoints.get(edge.key)!
+            
+            // Create 2 triangles
+            newIndices.push(edge.v1, midpoint, vc)
+            newIndices.push(midpoint, edge.v2, vc)
+          } else if (subdividedEdges.length === 2) {
+            // Two edges subdivided - split into 3 triangles
+            // In a triangle, two edges always share a vertex
+            const edge1 = subdividedEdges[0]
+            const edge2 = subdividedEdges[1]
+            const midpoint1 = edgeMidpoints.get(edge1.key)!
+            const midpoint2 = edgeMidpoints.get(edge2.key)!
+            
+            // Find the common vertex where the two subdivided edges meet
+            const commonVertex = [edge1.v1, edge1.v2].find(v => v === edge2.v1 || v === edge2.v2)
+            
+            if (commonVertex === undefined) {
+              // This shouldn't happen in a triangle, but fallback to keeping original triangle
+              newIndices.push(v0, v1, v2)
+              continue
+            }
+            
+            // Find the two non-common vertices (one from each edge)
+            const edge1OtherVertex = edge1.v1 === commonVertex ? edge1.v2 : edge1.v1
+            const edge2OtherVertex = edge2.v1 === commonVertex ? edge2.v2 : edge2.v1
+            
+            // The original triangle has vertices: commonVertex, edge1OtherVertex, edge2OtherVertex
+            // Create 3 triangles without duplicate vertices:
+            // 1. Triangle: commonVertex, midpoint1, midpoint2 (connects common vertex to both midpoints)
+            // 2. Triangle: midpoint1, edge1OtherVertex, midpoint2 (connects edge1's other vertex)
+            // 3. Triangle: midpoint2, edge2OtherVertex, edge1OtherVertex (connects edge2's other vertex back to edge1's other vertex)
+            newIndices.push(commonVertex, midpoint1, midpoint2)
+            newIndices.push(midpoint1, edge1OtherVertex, midpoint2)
+            newIndices.push(midpoint2, edge2OtherVertex, edge1OtherVertex)
+          } else {
+            // All 3 edges subdivided - split into 4 triangles
+            const midpoints = edges.map(e => edgeMidpoints.get(e.key)!)
+            newIndices.push(v0, midpoints[0], midpoints[2])
+            newIndices.push(midpoints[0], v1, midpoints[1])
+            newIndices.push(midpoints[1], v2, midpoints[2])
+            newIndices.push(midpoints[0], midpoints[1], midpoints[2])
+          }
+        }
+        
+        currentPoints = newPoints
+        currentIndices = newIndices
+        subdivisionCount++
+      }
+      
+      // Rebuild vertices array from subdivided points
+      const finalVerticesArray: number[] = []
+      currentPoints.forEach(point => {
+        finalVerticesArray.push(point.x, point.y, point.z)
+      })
+      
+      // Replace the original arrays with subdivided versions
+      uniquePoints.length = 0
+      uniquePoints.push(...currentPoints)
+      vertices.length = 0
+      vertices.push(...finalVerticesArray)
+      indices.length = 0
+      indices.push(...currentIndices)
 
-        // Validate geometry
-        if (geometry.attributes.position.count === 0) {
-          console.warn('Terrain geometry has no vertices')
+      // Limit triangle count for performance
+      const MAX_TRIANGLES = 25000
+      if (indices.length > MAX_TRIANGLES * 3) {
+        indices.length = MAX_TRIANGLES * 3
+      }
+      
+      let safeIndices = indices
+      let extendedVertices = [...vertices]
+      let extendedPoints = [...uniquePoints]
+      
+      // Extend boundary edges outward if extendEdges > 0
+      if (extendEdges > 0) {
+        // Find boundary edges (edges that appear only once)
+        const edgeCount = new Map<string, number>() // "v1-v2" -> count
+        
+        for (let i = 0; i < safeIndices.length; i += 3) {
+          const v0 = safeIndices[i]
+          const v1 = safeIndices[i + 1]
+          const v2 = safeIndices[i + 2]
+          
+          // Count each edge (always use smaller index first)
+          const edges = [
+            [Math.min(v0, v1), Math.max(v0, v1)],
+            [Math.min(v1, v2), Math.max(v1, v2)],
+            [Math.min(v2, v0), Math.max(v2, v0)]
+          ]
+          
+          edges.forEach(([minIdx, maxIdx]) => {
+            const key = `${minIdx}-${maxIdx}`
+            edgeCount.set(key, (edgeCount.get(key) || 0) + 1)
+          })
+        }
+        
+        // Find boundary edges (count === 1)
+        const boundaryEdges: Array<[number, number]> = []
+        edgeCount.forEach((count, key) => {
+          if (count === 1) {
+            const [v1, v2] = key.split('-').map(Number)
+            boundaryEdges.push([v1, v2])
+          }
+        })
+        
+        if (boundaryEdges.length > 0) {
+          // Calculate center of mesh (average of all points)
+          let centerX = 0, centerZ = 0, centerY = 0
+          uniquePoints.forEach(p => {
+            centerX += p.x
+            centerZ += p.z
+            centerY += p.y
+          })
+          centerX /= uniquePoints.length
+          centerZ /= uniquePoints.length
+          centerY /= uniquePoints.length
+          
+          // Collect boundary vertices (vertices that are part of boundary edges)
+          const boundaryVertices = new Set<number>()
+          boundaryEdges.forEach(([v1, v2]) => {
+            boundaryVertices.add(v1)
+            boundaryVertices.add(v2)
+          })
+          
+          // Extend each boundary vertex outward
+          const vertexExtensionMap = new Map<number, number>() // old index -> new index
+          boundaryVertices.forEach(vertexIdx => {
+            const point = uniquePoints[vertexIdx]
+            
+            // Calculate direction from center to vertex
+            const dx = point.x - centerX
+            const dz = point.z - centerZ
+            const dist = Math.sqrt(dx * dx + dz * dz)
+            
+            if (dist > 0) {
+              // Normalize and extend
+              const extendX = (dx / dist) * extendEdges
+              const extendZ = (dz / dist) * extendEdges
+              
+              // Create extended vertex (same Y elevation)
+              const extendedPoint = {
+                x: point.x + extendX,
+                z: point.z + extendZ,
+                y: point.y
+              }
+              
+              const newIndex = extendedPoints.length
+              extendedPoints.push(extendedPoint)
+              extendedVertices.push(extendedPoint.x, extendedPoint.y, extendedPoint.z)
+              vertexExtensionMap.set(vertexIdx, newIndex)
+            }
+          })
+          
+          // Create triangles connecting boundary edges to extended vertices
+          boundaryEdges.forEach(([v1, v2]) => {
+            const extV1 = vertexExtensionMap.get(v1)
+            const extV2 = vertexExtensionMap.get(v2)
+            
+            if (extV1 !== undefined && extV2 !== undefined) {
+              // Create quad from original edge to extended edge
+              // Triangle 1: v1, v2, extV1
+              safeIndices.push(v1, v2, extV1)
+              // Triangle 2: v2, extV2, extV1
+              safeIndices.push(v2, extV2, extV1)
+            }
+          })
+        }
+      }
+      
+      // Create geometry
+      try {
+        const geometry = new THREE.BufferGeometry()
+        
+        // Use extended vertices if edges were extended
+        const finalVertices = extendEdges > 0 ? extendedVertices : vertices
+        const finalVertexCount = finalVertices.length / 3
+        const actualMaxIndex = Math.max(...safeIndices)
+        
+        if (actualMaxIndex >= finalVertexCount) {
+          console.error('Terrain mesh: Index out of bounds')
           return
         }
-
+        
+        // If thickness > 0, create extruded geometry with top, bottom, and sides
+        if (thickness > 0) {
+          const topVertexCount = finalVertexCount
+          const allVertices: number[] = []
+          const allIndices: number[] = []
+          
+          // 1. Add top surface vertices (original or extended vertices)
+          allVertices.push(...finalVertices)
+          
+          // 2. Add bottom surface vertices (offset downward by thickness)
+          const pointsToUse = extendEdges > 0 ? extendedPoints : uniquePoints
+          pointsToUse.forEach(point => {
+            allVertices.push(point.x, point.y - thickness, point.z)
+          })
+          
+          // 3. Add top surface indices (original, but ensure correct winding)
+          safeIndices.forEach((idx, i) => {
+            if (i % 3 === 0) {
+              // For each triangle, add it to top surface
+              allIndices.push(safeIndices[i], safeIndices[i + 1], safeIndices[i + 2])
+            }
+          })
+          
+          // 4. Add bottom surface indices (reversed winding for bottom face)
+          safeIndices.forEach((idx, i) => {
+            if (i % 3 === 0) {
+              // Reverse winding for bottom face
+              allIndices.push(
+                topVertexCount + safeIndices[i + 2],
+                topVertexCount + safeIndices[i + 1],
+                topVertexCount + safeIndices[i]
+              )
+            }
+          })
+          
+          // 5. Add side faces (connect top and bottom edges)
+          // We need to find edges that are part of the boundary
+          // For simplicity, we'll create side faces for all triangle edges
+          // This creates some duplicate faces but ensures complete coverage
+          const edgeMap = new Map<string, number[]>() // "v1-v2" -> [v1, v2, triangleIndex]
+          
+          // Collect all edges from triangles
+          for (let i = 0; i < safeIndices.length; i += 3) {
+            const v0 = safeIndices[i]
+            const v1 = safeIndices[i + 1]
+            const v2 = safeIndices[i + 2]
+            
+            // Create edges (always use smaller index first for consistency)
+            const edges = [
+              [Math.min(v0, v1), Math.max(v0, v1)],
+              [Math.min(v1, v2), Math.max(v1, v2)],
+              [Math.min(v2, v0), Math.max(v2, v0)]
+            ]
+            
+            edges.forEach(([minIdx, maxIdx]) => {
+              const key = `${minIdx}-${maxIdx}`
+              if (!edgeMap.has(key)) {
+                edgeMap.set(key, [minIdx, maxIdx])
+              }
+            })
+          }
+          
+          // Create side faces for each edge
+          edgeMap.forEach((edge) => {
+            const [vTop1, vTop2] = edge
+            const vBottom1 = topVertexCount + vTop1
+            const vBottom2 = topVertexCount + vTop2
+            
+            // Create two triangles for the quad (side face)
+            // Triangle 1: vTop1, vTop2, vBottom1
+            allIndices.push(vTop1, vTop2, vBottom1)
+            // Triangle 2: vTop2, vBottom2, vBottom1
+            allIndices.push(vTop2, vBottom2, vBottom1)
+          })
+          
+          geometry.setAttribute('position', new THREE.Float32BufferAttribute(allVertices, 3))
+          geometry.setIndex(allIndices)
+        } else {
+          // Flat mesh (original or extended behavior)
+          geometry.setAttribute('position', new THREE.Float32BufferAttribute(finalVertices, 3))
+        geometry.setIndex(safeIndices)
+        }
+        
+        // Compute normals for proper lighting response
+        geometry.computeVertexNormals()
+        
+        // Add vertex colors based on normals (peaks/edges will have different colors)
+        const positions = geometry.attributes.position
+        const normals = geometry.attributes.normal
+        const vertexCount = positions.count
+        const colors: number[] = []
+        
+        // Parse base color and edge color
+        const baseColor = new THREE.Color(color)
+        const edgeColorObj = new THREE.Color(edgeColor)
+        
+        // Calculate elevation range for normalization
+        let minY = Infinity
+        let maxY = -Infinity
+        for (let i = 0; i < vertexCount; i++) {
+          const y = positions.getY(i)
+          minY = Math.min(minY, y)
+          maxY = Math.max(maxY, y)
+        }
+        const elevationRange = maxY - minY
+        
+        // Calculate thresholds - only apply edge color to very pointy/edge-like vertices
+        const peakThreshold = 0.85 // Only top 15% of peaks get edge color
+        const edgeThreshold = 0.9 // Only very sharp edges get edge color
+        
+        // First pass: collect all factors to find thresholds
+        const peakFactors: number[] = []
+        const edgeFactors: number[] = []
+        
+        for (let i = 0; i < vertexCount; i++) {
+          const nx = normals.getX(i)
+          const ny = normals.getY(i)
+          const nz = normals.getZ(i)
+          const y = positions.getY(i)
+          
+          // Calculate peak factor (vertical normal + high elevation)
+          const verticalNormal = Math.max(0, ny)
+          const elevationFactor = elevationRange > 0 
+            ? (y - minY) / elevationRange
+            : 0
+          const peakFactor = verticalNormal * 0.7 + elevationFactor * 0.3
+          
+          // Calculate edge factor (horizontal deviation)
+          const horizontalDeviation = Math.sqrt(nx * nx + nz * nz)
+          const edgeFactor = horizontalDeviation
+          
+          peakFactors.push(peakFactor)
+          edgeFactors.push(edgeFactor)
+        }
+        
+        // Find percentile thresholds
+        const sortedPeaks = [...peakFactors].sort((a, b) => b - a)
+        const sortedEdges = [...edgeFactors].sort((a, b) => b - a)
+        const peakThresholdValue = sortedPeaks[Math.floor(sortedPeaks.length * (1 - peakThreshold))]
+        const edgeThresholdValue = sortedEdges[Math.floor(sortedEdges.length * (1 - edgeThreshold))]
+        
+        // Second pass: apply colors only to vertices above thresholds
+        for (let i = 0; i < vertexCount; i++) {
+          const peakFactor = peakFactors[i]
+          const edgeFactor = edgeFactors[i]
+          
+          // Only apply edge color if vertex is above threshold
+          const isPeak = peakFactor >= peakThresholdValue
+          const isEdge = edgeFactor >= edgeThresholdValue
+          
+          let edgeColorFactor = 0
+          if (isPeak || isEdge) {
+            // Calculate how far above threshold (0-1)
+            const peakIntensity = isPeak 
+              ? Math.min(1, (peakFactor - peakThresholdValue) / (1 - peakThresholdValue))
+              : 0
+            const edgeIntensity = isEdge
+              ? Math.min(1, (edgeFactor - edgeThresholdValue) / (1 - edgeThresholdValue))
+              : 0
+            
+            // Use the maximum intensity, but keep it subtle
+            edgeColorFactor = Math.min(1, Math.max(peakIntensity, edgeIntensity) * 0.8)
+          }
+          
+          // Interpolate between base color and edge color
+          const mixedColor = baseColor.clone().lerp(edgeColorObj, edgeColorFactor)
+          
+          colors.push(mixedColor.r, mixedColor.g, mixedColor.b)
+        }
+        
+        geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
+        
         setTerrainGeometry(geometry)
+        
+        // Notify parent that geometry is ready for export
+        if (onGeometryReady) {
+          onGeometryReady(geometry)
+        }
 
         return () => {
           geometry.dispose()
@@ -1147,20 +1354,97 @@ function SimpleTerrainMesh({
       console.error('Error creating terrain mesh:', error)
       setTerrainGeometry(null)
     }
-  }, [skiFeatures, center, elevationScale, bounds, elevationOffset, tubeRadius])
+  }, [skiFeatures, center, elevationScale, bounds, elevationOffset, tubeRadius, thickness, extendEdges, color, edgeColor])
 
   if (!show || !terrainGeometry) return null
 
+  const finalOpacity = Math.max(0.1, animatedOpacity)
+
   return (
     <mesh geometry={terrainGeometry} renderOrder={-1}>
-      <meshStandardMaterial
-        color={color}
-        transparent={opacity < 1}
-        opacity={opacity}
+      <meshBasicMaterial
+        color={wireframe ? '#ff0000' : color}
+        transparent={finalOpacity < 1}
+        opacity={finalOpacity}
+        wireframe={wireframe}
+        side={THREE.DoubleSide} // Render both sides - visible from top and bottom
+        depthWrite={true}
+        depthTest={true}
+        vertexColors={!wireframe} // Use vertex colors when not in wireframe mode
+      />
+    </mesh>
+  )
+}
+
+// Component to render imported mesh from OBJ file
+function ImportedTerrainMesh({
+  geometry,
+  opacity = 1,
+  wireframe = false,
+  color = '#ffffff',
+  edgeColor = '#888888'
+}: {
+  geometry: THREE.BufferGeometry
+  opacity?: number
+  wireframe?: boolean
+  color?: string
+  edgeColor?: string
+}) {
+  const finalOpacity = Math.max(0.1, opacity)
+  
+  useEffect(() => {
+    console.log('ImportedTerrainMesh rendering:', {
+      vertexCount: geometry.attributes.position?.count || 0,
+      faceCount: geometry.index?.count ? geometry.index.count / 3 : 0,
+      hasNormals: !!geometry.attributes.normal,
+      hasColors: !!geometry.attributes.color
+    })
+  }, [geometry])
+  
+  // Update vertex colors if needed
+  useEffect(() => {
+    if (!wireframe && geometry.attributes.color) {
+      const baseColor = new THREE.Color(color)
+      const edgeColorObj = new THREE.Color(edgeColor)
+      const colors = geometry.attributes.color.array as Float32Array
+      
+      // Update colors based on normals (similar to generated mesh)
+      if (geometry.attributes.normal) {
+        const normals = geometry.attributes.normal
+        const vertexCount = geometry.attributes.position.count
+        
+        for (let i = 0; i < vertexCount; i++) {
+          const nx = normals.getX(i)
+          const ny = normals.getY(i)
+          const nz = normals.getZ(i)
+          
+          // Simple peak/edge detection
+          const verticalNormal = Math.max(0, ny)
+          const horizontalDeviation = Math.sqrt(nx * nx + nz * nz)
+          const edgeFactor = Math.min(1, (verticalNormal * 0.6 + horizontalDeviation * 0.4) * 0.8)
+          
+          const mixedColor = baseColor.clone().lerp(edgeColorObj, edgeFactor)
+          colors[i * 3] = mixedColor.r
+          colors[i * 3 + 1] = mixedColor.g
+          colors[i * 3 + 2] = mixedColor.b
+        }
+        
+        geometry.attributes.color.needsUpdate = true
+      }
+    }
+  }, [geometry, color, edgeColor, wireframe])
+  
+  return (
+    <mesh geometry={geometry} renderOrder={-1}>
+      <meshBasicMaterial
+        color={wireframe ? '#ff0000' : color}
+        transparent={finalOpacity < 1}
+        opacity={finalOpacity}
         wireframe={wireframe}
         side={THREE.DoubleSide}
         depthWrite={true}
         depthTest={true}
+        vertexColors={!wireframe}
       />
     </mesh>
   )
@@ -1426,992 +1710,12 @@ function AxesAtHighestPoint({
 }
 
 // Terrain mesh type options
-export type TerrainMeshType = 
-  | 'none'                    // No terrain
-  | 'delaunay'                // Delaunay triangulated terrain (from trail points)
-  | 'point-cloud'             // Point cloud visualization of terrain points
-  | 'heightmap-grid'          // Grid-based heightmap with interpolation
-  | 'grid-nearest'            // Grid with nearest neighbor interpolation
-  | 'grid-bilinear'           // Grid with bilinear interpolation
-  | 'voronoi'                 // Voronoi diagram mesh
-  | 'convex-hull'             // Convex hull boundary mesh
-
-// Component to render terrain points as point cloud
-function PointCloudTerrain({
-  skiFeatures,
-  center,
-  elevationScale,
-  opacity = 0.7
-}: {
-  skiFeatures: SkiFeature[]
-  center: [number, number]
-  elevationScale: number
-  opacity?: number
-}) {
-  const [points, setPoints] = useState<THREE.Vector3[]>([])
-
-  useEffect(() => {
-    const allPoints: THREE.Vector3[] = []
-    
-    skiFeatures.filter(f => f.type === 'trail').forEach(feature => {
-      if (!feature.geometry) return
-      
-      const coords = feature.geometry.type === 'LineString'
-        ? feature.geometry.coordinates
-        : feature.geometry.type === 'MultiLineString'
-          ? feature.geometry.coordinates.flat()
-          : []
-
-      // Use EXACT same elevation extraction logic as SimpleTrail3D
-      let hasElevation = false
-      coords.forEach((coord: number[]) => {
-        if (coord && coord.length > 2 && coord[2] !== undefined && coord[2] !== null && !isNaN(coord[2])) {
-          hasElevation = true
-        }
-      })
-
-      // Determine elevation to use (same logic as trails)
-      let elevationToUse: number | null = null
-      
-      if (!hasElevation) {
-        const metadata = feature.metadata
-        const metadataElevation = extractElevationFromMetadata(metadata)
-        
-        if (metadataElevation !== null && typeof metadataElevation === 'number' && !isNaN(metadataElevation)) {
-          elevationToUse = metadataElevation
-        } else if (metadata?.elevation_min !== undefined || metadata?.elevation_max !== undefined) {
-          const min = typeof metadata.elevation_min === 'number' ? metadata.elevation_min : 0
-          const max = typeof metadata.elevation_max === 'number' ? metadata.elevation_max : 0
-          elevationToUse = (min + max) / 2
-        } else if (metadata?.elevation_avg !== undefined && typeof metadata.elevation_avg === 'number') {
-          elevationToUse = metadata.elevation_avg
-        }
-      }
-
-      coords.forEach((coord: number[]) => {
-        if (!coord || coord.length < 2) return
-        
-        const lng = coord[0]
-        const lat = coord[1]
-        if (isNaN(lng) || isNaN(lat) || !isFinite(lng) || !isFinite(lat)) {
-          return
-        }
-        
-        // Use EXACT same elevation logic as SimpleTrail3D
-        const elevation = coord.length > 2 && coord[2] !== undefined && coord[2] !== null && !isNaN(coord[2])
-          ? coord[2]
-          : elevationToUse !== null && !isNaN(elevationToUse)
-            ? elevationToUse
-            : 0
-        
-        try {
-          const [x, y, z] = geoJsonToSimpleSceneCoords([lng, lat, elevation], center, elevationScale)
-          if (isFinite(x) && isFinite(y) && isFinite(z)) {
-            allPoints.push(new THREE.Vector3(x, y, z))
-          }
-        } catch (err) {
-          // Skip invalid points
-        }
-      })
-    })
-
-    // Limit points for performance
-    const MAX_POINTS = 10000
-    if (allPoints.length > MAX_POINTS) {
-      const step = Math.ceil(allPoints.length / MAX_POINTS)
-      const sampled: THREE.Vector3[] = []
-      for (let i = 0; i < allPoints.length; i += step) {
-        sampled.push(allPoints[i])
-      }
-      setPoints(sampled)
-    } else {
-      setPoints(allPoints)
-    }
-  }, [skiFeatures, center, elevationScale])
-
-  if (points.length === 0) {
-    console.warn('PointCloudTerrain: No points generated')
-    return null
-  }
-
-  console.log(`PointCloudTerrain: Rendering ${points.length} points`)
-
-  const geometry = new THREE.BufferGeometry().setFromPoints(points)
-  return (
-    <points geometry={geometry}>
-      <pointsMaterial 
-        size={8} 
-        color="#ff6b35" 
-        transparent={opacity < 1}
-        opacity={opacity}
-        sizeAttenuation={false}
-      />
-    </points>
-  )
-}
-
-// Helper function to collect all terrain points (same logic as SimpleTerrainMesh)
-function collectTerrainPoints(
-  skiFeatures: SkiFeature[],
-  center: [number, number],
-  elevationScale: number,
-  elevationOffset: number = 0,
-  tubeRadius: number = 6
-): Array<{ x: number; y: number; z: number }> {
-  const runPoints: Array<{ x: number; z: number; y: number }> = []
-
-  skiFeatures.forEach((feature) => {
-    if (!feature.geometry || !feature.geometry.coordinates || feature.type !== 'trail') return
-
-    const coords = feature.geometry.type === 'LineString'
-      ? feature.geometry.coordinates
-      : feature.geometry.type === 'MultiLineString'
-        ? feature.geometry.coordinates.flat()
-        : []
-
-    let hasElevation = false
-    coords.forEach((coord: number[]) => {
-      if (coord && coord.length > 2 && coord[2] !== undefined && coord[2] !== null && !isNaN(coord[2])) {
-        hasElevation = true
-      }
-    })
-
-    let elevationToUse: number | null = null
-    
-    if (!hasElevation) {
-      const metadata = feature.metadata
-      const metadataElevation = extractElevationFromMetadata(metadata)
-      
-      if (metadataElevation !== null && typeof metadataElevation === 'number' && !isNaN(metadataElevation)) {
-        elevationToUse = metadataElevation
-      } else if (metadata?.elevation_min !== undefined || metadata?.elevation_max !== undefined) {
-        const min = typeof metadata.elevation_min === 'number' ? metadata.elevation_min : 0
-        const max = typeof metadata.elevation_max === 'number' ? metadata.elevation_max : 0
-        elevationToUse = (min + max) / 2
-      } else if (metadata?.elevation_avg !== undefined && typeof metadata.elevation_avg === 'number') {
-        elevationToUse = metadata.elevation_avg
-      }
-    }
-
-    coords.forEach((coord: number[]) => {
-      if (!coord || coord.length < 2) return
-
-      const lng = coord[0]
-      const lat = coord[1]
-      if (isNaN(lng) || isNaN(lat) || !isFinite(lng) || !isFinite(lat)) return
-
-      const elevation = coord.length > 2 && coord[2] !== undefined && coord[2] !== null && !isNaN(coord[2])
-        ? coord[2]
-        : elevationToUse !== null && !isNaN(elevationToUse)
-          ? elevationToUse
-          : 0
-
-      const [x, y, z] = geoJsonToSimpleSceneCoords([lng, lat, elevation], center, elevationScale)
-      
-      if (isNaN(x) || isNaN(y) || isNaN(z) || !isFinite(x) || !isFinite(y) || !isFinite(z)) return
-
-      const terrainY = y - tubeRadius - elevationOffset
-      runPoints.push({ x, y: terrainY, z })
-    })
-  })
-
-  return runPoints
-}
-
-// Heightmap Grid with interpolation
-function HeightmapGridTerrain({
-  skiFeatures,
-  center,
-  elevationScale,
-  bounds,
-  elevationOffset = 0,
-  tubeRadius = 6,
-  opacity = 0.7,
-  wireframe = false
-}: {
-  skiFeatures: SkiFeature[]
-  center: [number, number]
-  elevationScale: number
-  bounds: { minLat: number; maxLat: number; minLng: number; maxLng: number }
-  elevationOffset?: number
-  tubeRadius?: number
-  opacity?: number
-  wireframe?: boolean
-}) {
-  const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null)
-
-  useEffect(() => {
-    try {
-      const points = collectTerrainPoints(skiFeatures, center, elevationScale, elevationOffset, tubeRadius)
-      if (points.length === 0) return
-
-      // Calculate grid bounds from points
-      let minX = Infinity, maxX = -Infinity
-      let minZ = Infinity, maxZ = -Infinity
-      points.forEach(p => {
-        minX = Math.min(minX, p.x)
-        maxX = Math.max(maxX, p.x)
-        minZ = Math.min(minZ, p.z)
-        maxZ = Math.max(maxZ, p.z)
-      })
-
-      const width = maxX - minX
-      const depth = maxZ - minZ
-      const gridSize = 50 // Number of grid cells per dimension
-      const cellWidth = width / gridSize
-      const cellDepth = depth / gridSize
-
-      const vertices: number[] = []
-      const indices: number[] = []
-
-      // Create grid and interpolate heights using inverse distance weighting
-      for (let i = 0; i <= gridSize; i++) {
-        for (let j = 0; j <= gridSize; j++) {
-          const x = minX + (i * cellWidth)
-          const z = minZ + (j * cellDepth)
-          
-          // Inverse distance weighting interpolation
-          let totalWeight = 0
-          let weightedHeight = 0
-          const searchRadius = Math.max(cellWidth, cellDepth) * 2
-
-          points.forEach(p => {
-            const dx = x - p.x
-            const dz = z - p.z
-            const dist = Math.sqrt(dx * dx + dz * dz)
-            
-            if (dist < searchRadius && dist > 0.001) {
-              const weight = 1 / (dist * dist) // Inverse distance squared
-              totalWeight += weight
-              weightedHeight += p.y * weight
-            } else if (dist <= 0.001) {
-              // Exact match
-              totalWeight = 1
-              weightedHeight = p.y
-            }
-          })
-
-          const y = totalWeight > 0 ? weightedHeight / totalWeight : 0
-          vertices.push(x, y, z)
-        }
-      }
-
-      // Create triangles
-      for (let i = 0; i < gridSize; i++) {
-        for (let j = 0; j < gridSize; j++) {
-          const a = i * (gridSize + 1) + j
-          const b = a + 1
-          const c = a + (gridSize + 1)
-          const d = c + 1
-
-          indices.push(a, c, b, b, c, d)
-        }
-      }
-
-      const geom = new THREE.BufferGeometry()
-      geom.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
-      geom.setIndex(indices)
-      geom.computeVertexNormals()
-      setGeometry(geom)
-    } catch (error) {
-      console.error('Error creating heightmap grid:', error)
-      setGeometry(null)
-    }
-  }, [skiFeatures, center, elevationScale, bounds, elevationOffset, tubeRadius])
-
-  if (!geometry) return null
-
-  return (
-    <mesh geometry={geometry} renderOrder={-1}>
-      <meshStandardMaterial
-        color="#8b7355"
-        transparent={opacity < 1}
-        opacity={opacity}
-        wireframe={wireframe}
-        side={THREE.DoubleSide}
-      />
-    </mesh>
-  )
-}
-
-// Grid with Nearest Neighbor
-function GridNearestTerrain({
-  skiFeatures,
-  center,
-  elevationScale,
-  bounds,
-  elevationOffset = 0,
-  tubeRadius = 6,
-  opacity = 0.7,
-  wireframe = false
-}: {
-  skiFeatures: SkiFeature[]
-  center: [number, number]
-  elevationScale: number
-  bounds: { minLat: number; maxLat: number; minLng: number; maxLng: number }
-  elevationOffset?: number
-  tubeRadius?: number
-  opacity?: number
-  wireframe?: boolean
-}) {
-  const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null)
-
-  useEffect(() => {
-    try {
-      const points = collectTerrainPoints(skiFeatures, center, elevationScale, elevationOffset, tubeRadius)
-      if (points.length === 0) return
-
-      let minX = Infinity, maxX = -Infinity
-      let minZ = Infinity, maxZ = -Infinity
-      points.forEach(p => {
-        minX = Math.min(minX, p.x)
-        maxX = Math.max(maxX, p.x)
-        minZ = Math.min(minZ, p.z)
-        maxZ = Math.max(maxZ, p.z)
-      })
-
-      const width = maxX - minX
-      const depth = maxZ - minZ
-      const gridSize = 50
-      const cellWidth = width / gridSize
-      const cellDepth = depth / gridSize
-
-      const vertices: number[] = []
-      const indices: number[] = []
-
-      for (let i = 0; i <= gridSize; i++) {
-        for (let j = 0; j <= gridSize; j++) {
-          const x = minX + (i * cellWidth)
-          const z = minZ + (j * cellDepth)
-          
-          // Find nearest point
-          let nearestDist = Infinity
-          let nearestY = 0
-          points.forEach(p => {
-            const dx = x - p.x
-            const dz = z - p.z
-            const dist = Math.sqrt(dx * dx + dz * dz)
-            if (dist < nearestDist) {
-              nearestDist = dist
-              nearestY = p.y
-            }
-          })
-
-          vertices.push(x, nearestY, z)
-        }
-      }
-
-      for (let i = 0; i < gridSize; i++) {
-        for (let j = 0; j < gridSize; j++) {
-          const a = i * (gridSize + 1) + j
-          const b = a + 1
-          const c = a + (gridSize + 1)
-          const d = c + 1
-          indices.push(a, c, b, b, c, d)
-        }
-      }
-
-      const geom = new THREE.BufferGeometry()
-      geom.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
-      geom.setIndex(indices)
-      geom.computeVertexNormals()
-      setGeometry(geom)
-    } catch (error) {
-      console.error('Error creating grid nearest terrain:', error)
-      setGeometry(null)
-    }
-  }, [skiFeatures, center, elevationScale, bounds, elevationOffset, tubeRadius])
-
-  if (!geometry) return null
-
-  return (
-    <mesh geometry={geometry} renderOrder={-1}>
-      <meshStandardMaterial
-        color="#8b7355"
-        transparent={opacity < 1}
-        opacity={opacity}
-        wireframe={wireframe}
-        side={THREE.DoubleSide}
-      />
-    </mesh>
-  )
-}
-
-// Grid with Bilinear Interpolation
-function GridBilinearTerrain({
-  skiFeatures,
-  center,
-  elevationScale,
-  bounds,
-  elevationOffset = 0,
-  tubeRadius = 6,
-  opacity = 0.7,
-  wireframe = false
-}: {
-  skiFeatures: SkiFeature[]
-  center: [number, number]
-  elevationScale: number
-  bounds: { minLat: number; maxLat: number; minLng: number; maxLng: number }
-  elevationOffset?: number
-  tubeRadius?: number
-  opacity?: number
-  wireframe?: boolean
-}) {
-  const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null)
-
-  useEffect(() => {
-    try {
-      const points = collectTerrainPoints(skiFeatures, center, elevationScale, elevationOffset, tubeRadius)
-      if (points.length === 0) return
-
-      let minX = Infinity, maxX = -Infinity
-      let minZ = Infinity, maxZ = -Infinity
-      points.forEach(p => {
-        minX = Math.min(minX, p.x)
-        maxX = Math.max(maxX, p.x)
-        minZ = Math.min(minZ, p.z)
-        maxZ = Math.max(maxZ, p.z)
-      })
-
-      const width = maxX - minX
-      const depth = maxZ - minZ
-      const gridSize = 50
-      const cellWidth = width / gridSize
-      const cellDepth = depth / gridSize
-
-      // Create a height map from points using nearest neighbor for grid corners
-      const heightMap: number[][] = []
-      for (let i = 0; i <= gridSize; i++) {
-        heightMap[i] = []
-        for (let j = 0; j <= gridSize; j++) {
-          const x = minX + (i * cellWidth)
-          const z = minZ + (j * cellDepth)
-          
-          let nearestDist = Infinity
-          let nearestY = 0
-          points.forEach(p => {
-            const dx = x - p.x
-            const dz = z - p.z
-            const dist = Math.sqrt(dx * dx + dz * dz)
-            if (dist < nearestDist) {
-              nearestDist = dist
-              nearestY = p.y
-            }
-          })
-          heightMap[i][j] = nearestY
-        }
-      }
-
-      const vertices: number[] = []
-      const indices: number[] = []
-
-      // Bilinear interpolation for smoother result
-      for (let i = 0; i <= gridSize; i++) {
-        for (let j = 0; j <= gridSize; j++) {
-          const x = minX + (i * cellWidth)
-          const z = minZ + (j * cellDepth)
-          const y = heightMap[i][j]
-          vertices.push(x, y, z)
-        }
-      }
-
-      for (let i = 0; i < gridSize; i++) {
-        for (let j = 0; j < gridSize; j++) {
-          const a = i * (gridSize + 1) + j
-          const b = a + 1
-          const c = a + (gridSize + 1)
-          const d = c + 1
-          indices.push(a, c, b, b, c, d)
-        }
-      }
-
-      const geom = new THREE.BufferGeometry()
-      geom.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
-      geom.setIndex(indices)
-      geom.computeVertexNormals()
-      setGeometry(geom)
-    } catch (error) {
-      console.error('Error creating bilinear grid terrain:', error)
-      setGeometry(null)
-    }
-  }, [skiFeatures, center, elevationScale, bounds, elevationOffset, tubeRadius])
-
-  if (!geometry) return null
-
-  return (
-    <mesh geometry={geometry} renderOrder={-1}>
-      <meshStandardMaterial
-        color="#8b7355"
-        transparent={opacity < 1}
-        opacity={opacity}
-        wireframe={wireframe}
-        side={THREE.DoubleSide}
-      />
-    </mesh>
-  )
-}
-
-// Voronoi Diagram Mesh
-function VoronoiTerrain({
-  skiFeatures,
-  center,
-  elevationScale,
-  bounds,
-  elevationOffset = 0,
-  tubeRadius = 6,
-  opacity = 0.7,
-  wireframe = false,
-  onCellSizesCalculated
-}: {
-  skiFeatures: SkiFeature[]
-  center: [number, number]
-  elevationScale: number
-  bounds: { minLat: number; maxLat: number; minLng: number; maxLng: number }
-  elevationOffset?: number
-  tubeRadius?: number
-  opacity?: number
-  wireframe?: boolean
-  onCellSizesCalculated?: (cellSizes: Map<string, number>) => void
-}) {
-  const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null)
-
-  useEffect(() => {
-    try {
-      const points = collectTerrainPoints(skiFeatures, center, elevationScale, elevationOffset, tubeRadius)
-      if (points.length < 3) return
-
-      // Calculate Voronoi cell sizes for each point
-      const cellSizes = new Map<string, number>()
-      points.forEach((point, idx) => {
-        // Find nearest neighbor distance (approximates cell radius)
-        let minDist = Infinity
-        points.forEach((p, i) => {
-          if (i === idx) return
-          const dist = Math.sqrt((p.x - point.x) ** 2 + (p.z - point.z) ** 2)
-          if (dist < minDist) {
-            minDist = dist
-          }
-        })
-        // Cell size is roughly 2x the distance to nearest neighbor
-        const cellSize = minDist * 2
-        const key = `${point.x.toFixed(2)},${point.z.toFixed(2)}`
-        cellSizes.set(key, cellSize)
-      })
-
-      // Notify parent of cell sizes for trail line width variation
-      if (onCellSizesCalculated) {
-        onCellSizesCalculated(cellSizes)
-      }
-
-      // Simplified Voronoi: create cells by finding boundaries between points
-      // For each point, find its neighbors and create a cell
-      const vertices: number[] = []
-      const indices: number[] = []
-      let vertexIndex = 0
-
-      points.forEach((point, idx) => {
-        // Find nearby points
-        const nearbyPoints = points
-          .map((p, i) => ({ point: p, dist: Math.sqrt((p.x - point.x) ** 2 + (p.z - point.z) ** 2), index: i }))
-          .filter(p => p.index !== idx && p.dist < 1000) // Within reasonable distance
-          .sort((a, b) => a.dist - b.dist)
-          .slice(0, 6) // Take closest 6 points
-
-        if (nearbyPoints.length < 3) return
-
-        // Get cell size for this point
-        const key = `${point.x.toFixed(2)},${point.z.toFixed(2)}`
-        const cellSize = cellSizes.get(key) || 100
-
-        // Create a polygon from cell points (simplified - just use point as center)
-        const centerY = point.y
-        const startIdx = vertexIndex
-        
-        // Use cell size to determine radius (larger cell = larger radius)
-        const radius = cellSize * 0.3 // Scale factor to make cells visible
-        for (let i = 0; i < 6; i++) {
-          const angle = (i / 6) * Math.PI * 2
-          const x = point.x + Math.cos(angle) * radius
-          const z = point.z + Math.sin(angle) * radius
-          vertices.push(x, centerY, z)
-        }
-
-        // Create triangles from center
-        for (let i = 0; i < 6; i++) {
-          indices.push(startIdx, startIdx + i, startIdx + ((i + 1) % 6))
-        }
-        vertexIndex += 6
-      })
-
-      if (vertices.length === 0) return
-
-      const geom = new THREE.BufferGeometry()
-      geom.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
-      geom.setIndex(indices)
-      geom.computeVertexNormals()
-      setGeometry(geom)
-    } catch (error) {
-      console.error('Error creating Voronoi terrain:', error)
-      setGeometry(null)
-    }
-  }, [skiFeatures, center, elevationScale, bounds, elevationOffset, tubeRadius, onCellSizesCalculated])
-
-  if (!geometry) return null
-
-  return (
-    <mesh geometry={geometry} renderOrder={-1}>
-      <meshStandardMaterial
-        color="#8b7355"
-        transparent={opacity < 1}
-        opacity={opacity}
-        wireframe={wireframe}
-        side={THREE.DoubleSide}
-      />
-    </mesh>
-  )
-}
-
-// Convex Hull Mesh
-function ConvexHullTerrain({
-  skiFeatures,
-  center,
-  elevationScale,
-  bounds,
-  elevationOffset = 0,
-  tubeRadius = 6,
-  opacity = 0.7,
-  wireframe = false
-}: {
-  skiFeatures: SkiFeature[]
-  center: [number, number]
-  elevationScale: number
-  bounds: { minLat: number; maxLat: number; minLng: number; maxLng: number }
-  elevationOffset?: number
-  tubeRadius?: number
-  opacity?: number
-  wireframe?: boolean
-}) {
-  const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null)
-
-  useEffect(() => {
-    try {
-      const points = collectTerrainPoints(skiFeatures, center, elevationScale, elevationOffset, tubeRadius)
-      if (points.length < 3) return
-
-      // Simple 2D convex hull algorithm (Graham scan)
-      // Project points to XZ plane, find hull, then use average Y
-      const points2D = points.map(p => ({ x: p.x, z: p.z, y: p.y }))
-      
-      // Find bottom-most point (or leftmost in case of tie)
-      let bottomIdx = 0
-      for (let i = 1; i < points2D.length; i++) {
-        if (points2D[i].z < points2D[bottomIdx].z || 
-            (points2D[i].z === points2D[bottomIdx].z && points2D[i].x < points2D[bottomIdx].x)) {
-          bottomIdx = i
-        }
-      }
-
-      // Sort by polar angle
-      const bottom = points2D[bottomIdx]
-      const sorted = points2D
-        .map((p, i) => ({
-          ...p,
-          angle: Math.atan2(p.z - bottom.z, p.x - bottom.x),
-          index: i
-        }))
-        .filter(p => p.index !== bottomIdx)
-        .sort((a, b) => a.angle - b.angle)
-
-      // Graham scan
-      const hull = [bottom, ...sorted.map(p => ({ x: p.x, z: p.z, y: p.y }))]
-      const stack: Array<{ x: number; z: number; y: number }> = [hull[0], hull[1]]
-
-      for (let i = 2; i < hull.length; i++) {
-        while (stack.length > 1) {
-          const p1 = stack[stack.length - 2]
-          const p2 = stack[stack.length - 1]
-          const p3 = hull[i]
-          
-          const cross = (p2.x - p1.x) * (p3.z - p1.z) - (p2.z - p1.z) * (p3.x - p1.x)
-          if (cross <= 0) break
-          stack.pop()
-        }
-        stack.push(hull[i])
-      }
-
-      if (stack.length < 3) return
-
-      // Calculate average Y for the hull
-      const avgY = stack.reduce((sum, p) => sum + p.y, 0) / stack.length
-
-      // Create mesh from convex hull
-      const vertices: number[] = []
-      const indices: number[] = []
-
-      stack.forEach(p => {
-        vertices.push(p.x, avgY, p.z)
-      })
-
-      // Triangulate (fan from first vertex)
-      for (let i = 1; i < stack.length - 1; i++) {
-        indices.push(0, i, i + 1)
-      }
-
-      const geom = new THREE.BufferGeometry()
-      geom.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
-      geom.setIndex(indices)
-      geom.computeVertexNormals()
-      setGeometry(geom)
-    } catch (error) {
-      console.error('Error creating convex hull terrain:', error)
-      setGeometry(null)
-    }
-  }, [skiFeatures, center, elevationScale, bounds, elevationOffset, tubeRadius])
-
-  if (!geometry) return null
-
-  return (
-    <mesh geometry={geometry} renderOrder={-1}>
-      <meshStandardMaterial
-        color="#8b7355"
-        transparent={opacity < 1}
-        opacity={opacity}
-        wireframe={wireframe}
-        side={THREE.DoubleSide}
-      />
-    </mesh>
-  )
-}
-
-// Component to render trails as tubes
-function TubeTrails({
-  skiFeatures,
-  center,
-  elevationScale
-}: {
-  skiFeatures: SkiFeature[]
-  center: [number, number]
-  elevationScale: number
-}) {
-  const trails = skiFeatures.filter(f => f.type === 'trail').slice(0, 100) // Limit for performance
-
-  return (
-    <>
-      {trails.map((feature) => {
-        if (!feature.geometry) return null
-        
-        const coords = feature.geometry.type === 'LineString'
-          ? feature.geometry.coordinates
-          : feature.geometry.type === 'MultiLineString'
-            ? feature.geometry.coordinates.flat()
-            : []
-
-        if (coords.length < 2) return null
-
-        const points: THREE.Vector3[] = []
-        coords.forEach((coord: number[]) => {
-          if (!coord || coord.length < 2) return
-          const lng = coord[0]
-          const lat = coord[1]
-          const elevation = coord.length > 2 ? coord[2] : 0
-          
-          try {
-            const [x, y, z] = geoJsonToSimpleSceneCoords([lng, lat, elevation], center, elevationScale)
-            if (isFinite(x) && isFinite(y) && isFinite(z)) {
-              points.push(new THREE.Vector3(x, y, z))
-            }
-          } catch (err) {
-            // Skip invalid points
-          }
-        })
-
-        if (points.length < 2) return null
-
-        try {
-          const curve = new THREE.CatmullRomCurve3(points)
-          const tubeGeometry = new THREE.TubeGeometry(curve, Math.max(16, points.length), 3, 8, false)
-          
-          const difficultyColors: Record<string, string> = {
-            'green': '#22c55e',
-            'blue': '#3b82f6',
-            'black': '#1f2937',
-            'double-black': '#ef4444',
-            'terrain-park': '#f97316',
-            'other': '#6b7280',
-          }
-          
-          const color = feature.difficulty ? difficultyColors[feature.difficulty] || '#6b7280' : '#6b7280'
-          
-          return (
-            <mesh key={feature.id} geometry={tubeGeometry}>
-              <meshStandardMaterial color={color} />
-            </mesh>
-          )
-        } catch (err) {
-          return null
-        }
-      })}
-    </>
-  )
-}
-
-// Component to render trails as ribbons (flat strips)
-function RibbonTrails({
-  skiFeatures,
-  center,
-  elevationScale
-}: {
-  skiFeatures: SkiFeature[]
-  center: [number, number]
-  elevationScale: number
-}) {
-  const trails = skiFeatures.filter(f => f.type === 'trail').slice(0, 200)
-
-  return (
-    <>
-      {trails.map((feature) => {
-        if (!feature.geometry) return null
-        
-        const coords = feature.geometry.type === 'LineString'
-          ? feature.geometry.coordinates
-          : feature.geometry.type === 'MultiLineString'
-            ? feature.geometry.coordinates.flat()
-            : []
-
-        if (coords.length < 2) return null
-
-        const points: THREE.Vector3[] = []
-        coords.forEach((coord: number[]) => {
-          if (!coord || coord.length < 2) return
-          const lng = coord[0]
-          const lat = coord[1]
-          const elevation = coord.length > 2 ? coord[2] : 0
-          
-          try {
-            const [x, y, z] = geoJsonToSimpleSceneCoords([lng, lat, elevation], center, elevationScale)
-            if (isFinite(x) && isFinite(y) && isFinite(z)) {
-              points.push(new THREE.Vector3(x, y, z))
-            }
-          } catch (err) {
-            // Skip invalid points
-          }
-        })
-
-        if (points.length < 2) return null
-
-        // Create ribbon geometry (flat strip along path)
-        const width = 10
-        const vertices: number[] = []
-        const indices: number[] = []
-
-        for (let i = 0; i < points.length - 1; i++) {
-          const p1 = points[i]
-          const p2 = points[i + 1]
-          
-          // Calculate perpendicular direction
-          const dir = new THREE.Vector3().subVectors(p2, p1).normalize()
-          const up = new THREE.Vector3(0, 1, 0)
-          const right = new THREE.Vector3().crossVectors(dir, up).normalize().multiplyScalar(width / 2)
-          
-          const v1 = new THREE.Vector3().addVectors(p1, right)
-          const v2 = new THREE.Vector3().subVectors(p1, right)
-          const v3 = new THREE.Vector3().addVectors(p2, right)
-          const v4 = new THREE.Vector3().subVectors(p2, right)
-          
-          const baseIndex = vertices.length / 3
-          vertices.push(v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, v3.x, v3.y, v3.z, v4.x, v4.y, v4.z)
-          
-          if (i > 0) {
-            indices.push(baseIndex - 2, baseIndex, baseIndex + 1, baseIndex - 2, baseIndex + 1, baseIndex - 1)
-          }
-          indices.push(baseIndex, baseIndex + 1, baseIndex + 2, baseIndex + 1, baseIndex + 3, baseIndex + 2)
-        }
-
-        if (vertices.length === 0) return null
-
-        const geometry = new THREE.BufferGeometry()
-        geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
-        geometry.setIndex(indices)
-        geometry.computeVertexNormals()
-
-        const difficultyColors: Record<string, string> = {
-          'green': '#22c55e',
-          'blue': '#3b82f6',
-          'black': '#1f2937',
-          'double-black': '#ef4444',
-          'terrain-park': '#f97316',
-          'other': '#6b7280',
-        }
-        
-        const color = feature.difficulty ? difficultyColors[feature.difficulty] || '#6b7280' : '#6b7280'
-
-        return (
-          <mesh key={feature.id} geometry={geometry}>
-            <meshStandardMaterial color={color} side={THREE.DoubleSide} />
-          </mesh>
-        )
-      })}
-    </>
-  )
-}
-
-// Component to calculate Voronoi cell sizes for variable line thickness
-function VoronoiCellSizeCalculator({
-  skiFeatures,
-  center,
-  elevationScale,
-  enabled,
-  onCellSizesCalculated
-}: {
-  skiFeatures: SkiFeature[]
-  center: [number, number]
-  elevationScale: number
-  enabled: boolean
-  onCellSizesCalculated: (cellSizes: Map<string, number>) => void
-}) {
-  useEffect(() => {
-    if (!enabled) {
-      onCellSizesCalculated(new Map())
-      return
-    }
-
-    try {
-      const elevationOffset = 0
-      const tubeRadius = 6
-      const points = collectTerrainPoints(skiFeatures, center, elevationScale, elevationOffset, tubeRadius)
-      
-      if (points.length < 2) {
-        onCellSizesCalculated(new Map())
-        return
-      }
-
-      // Calculate Voronoi cell sizes for each point
-      const cellSizes = new Map<string, number>()
-      points.forEach((point, idx) => {
-        // Find nearest neighbor distance (approximates cell radius)
-        let minDist = Infinity
-        points.forEach((p, i) => {
-          if (i === idx) return
-          const dist = Math.sqrt((p.x - point.x) ** 2 + (p.z - point.z) ** 2)
-          if (dist < minDist) {
-            minDist = dist
-          }
-        })
-        // Cell size is roughly 2x the distance to nearest neighbor
-        const cellSize = minDist * 2
-        const key = `${point.x.toFixed(2)},${point.z.toFixed(2)}`
-        cellSizes.set(key, cellSize)
-      })
-
-      onCellSizesCalculated(cellSizes)
-    } catch (error) {
-      console.error('Error calculating Voronoi cell sizes:', error)
-      onCellSizesCalculated(new Map())
-    }
-  }, [skiFeatures, center, elevationScale, enabled, onCellSizesCalculated])
-
-  return null // This component doesn't render anything
-}
+export type TerrainMeshType = 'none' | 'delaunay'
+
+// REMOVED: All unused terrain mesh functions and helpers
+// (PointCloudTerrain, collectTerrainPoints, HeightmapGridTerrain, GridNearestTerrain, 
+//  GridBilinearTerrain, VoronoiTerrain, ConvexHullTerrain, TubeTrails, RibbonTrails, 
+//  calculateAlphaShapeBoundary, SimplifiedBoundary, VoronoiCellSizeCalculator)
 
 // Main scene component with mesh type selector
 function SimpleScene3D({
@@ -2421,42 +1725,45 @@ function SimpleScene3D({
   bounds,
   terrainConfig,
   terrainMeshType = 'none',
-  terrainOpacity = 0.7,
+  terrainOpacity = 1,
   terrainWireframe = false,
-  useVoronoiLineThickness = false
+  terrainColor = '#ffffff',
+  terrainThickness = 0,
+  terrainExtendEdges = 0,
+  terrainEdgeColor = '#888888',
+  onTerrainGeometryReady,
+  importedMeshGeometry = null
 }: {
   skiFeatures: SkiFeature[]
   center: [number, number]
   elevationScale: number
   bounds: { minLat: number; maxLat: number; minLng: number; maxLng: number }
   terrainConfig?: {
-    gridResolution?: 'auto' | number
     elevationOffset?: number
-    searchRadiusMultiplier?: number
-    exactMatchTolerance?: number
-    safetyMargin?: number
   }
   terrainMeshType?: TerrainMeshType
   terrainOpacity?: number
   terrainWireframe?: boolean
-  useVoronoiLineThickness?: boolean
+  terrainColor?: string
+  terrainThickness?: number
+  terrainExtendEdges?: number
+  terrainEdgeColor?: string
+  onTerrainGeometryReady?: (geometry: THREE.BufferGeometry) => void
+  importedMeshGeometry?: THREE.BufferGeometry | null
 }) {
-  const [voronoiCellSizes, setVoronoiCellSizes] = useState<Map<string, number>>(new Map())
-  
-  // Filter to only show trails (not lifts, boundaries, etc.) for simplicity
-  let trails = skiFeatures.filter(f => f.type === 'trail')
+  // Filter to show trails, lifts, and boundaries
+  let features = skiFeatures.filter(f => f.type === 'trail' || f.type === 'lift' || f.type === 'boundary')
 
-  // Limit number of trails to prevent WebGL context loss
-  const MAX_TRAILS = 500
-  if (trails.length > MAX_TRAILS) {
-    console.warn(`Too many trails (${trails.length}), limiting to ${MAX_TRAILS} to prevent WebGL context loss`)
-    trails = trails.slice(0, MAX_TRAILS)
+  // Limit number of features to prevent WebGL context loss
+  const MAX_FEATURES = 500
+  if (features.length > MAX_FEATURES) {
+    console.warn(`Too many features (${features.length}), limiting to ${MAX_FEATURES} to prevent WebGL context loss`)
+    features = features.slice(0, MAX_FEATURES)
   }
 
-  if (trails.length === 0) {
+  if (features.length === 0) {
     return (
       <group>
-        {/* Show a message if no trails */}
         <Billboard position={[0, 100, 0]} follow={true}>
           <mesh position={[0, 0, -0.5]}>
             <planeGeometry args={[200, 40]} />
@@ -2469,7 +1776,7 @@ function SimpleScene3D({
             anchorY="middle"
             fontWeight="bold"
           >
-            No trails available
+            No trails, lifts, or boundaries available
           </Text>
         </Billboard>
       </group>
@@ -2478,118 +1785,45 @@ function SimpleScene3D({
 
   return (
     <>
-      {/* Calculate Voronoi cell sizes if variable line thickness is enabled */}
-      <VoronoiCellSizeCalculator
-        skiFeatures={skiFeatures}
-        center={center}
-        elevationScale={elevationScale}
-        enabled={useVoronoiLineThickness}
-        onCellSizesCalculated={setVoronoiCellSizes}
-      />
-      
-      {/* Always render trails as lines */}
-      {trails.map((feature, index) => {
-        // Limit variable thickness to first 50 trails for performance
-        // Tubes are expensive, so we only apply to a subset
-        const shouldUseVariableThickness = useVoronoiLineThickness && index < 50 && voronoiCellSizes.size > 0
-        return (
+      {/* Render trails, lifts, and boundaries as lines */}
+      {features.map((feature) => (
         <SimpleTrail3D
-          key={`trail-${feature.id}`}
+          key={`${feature.type}-${feature.id}`}
           feature={feature}
           center={center}
           elevationScale={elevationScale}
-            voronoiCellSizes={shouldUseVariableThickness ? voronoiCellSizes : undefined}
+        />
+      ))}
+      
+      {/* Render imported mesh if available, otherwise render generated mesh */}
+      {importedMeshGeometry ? (
+        <ImportedTerrainMesh
+          key="imported-mesh"
+          geometry={importedMeshGeometry}
+          opacity={terrainOpacity}
+          wireframe={terrainWireframe}
+          color={terrainColor}
+          edgeColor={terrainEdgeColor}
+        />
+      ) : (
+        terrainMeshType === 'delaunay' && (
+          <SimpleTerrainMesh
+            skiFeatures={skiFeatures}
+            center={center}
+            elevationScale={elevationScale}
+            bounds={bounds}
+            elevationOffset={terrainConfig?.elevationOffset || 0}
+            tubeRadius={6}
+            show={true}
+            opacity={terrainOpacity}
+            wireframe={terrainWireframe}
+            color={terrainColor}
+            thickness={terrainThickness}
+            extendEdges={terrainExtendEdges}
+            edgeColor={terrainEdgeColor}
+            onGeometryReady={onTerrainGeometryReady}
           />
         )
-      })}
-      
-      {/* Render terrain based on terrain mesh type */}
-      {terrainMeshType === 'delaunay' && (
-        <SimpleTerrainMesh
-          skiFeatures={skiFeatures}
-          center={center}
-          elevationScale={elevationScale}
-          bounds={bounds}
-          elevationOffset={terrainConfig?.elevationOffset || 0}
-          tubeRadius={6}
-          show={true}
-          opacity={terrainOpacity}
-          wireframe={terrainWireframe}
-        />
-      )}
-      
-      {terrainMeshType === 'point-cloud' && (
-        <PointCloudTerrain
-          skiFeatures={skiFeatures}
-          center={center}
-          elevationScale={elevationScale}
-          opacity={terrainOpacity}
-        />
-      )}
-      
-      {terrainMeshType === 'heightmap-grid' && (
-        <HeightmapGridTerrain
-          skiFeatures={skiFeatures}
-          center={center}
-          elevationScale={elevationScale}
-          bounds={bounds}
-          elevationOffset={terrainConfig?.elevationOffset || 0}
-          tubeRadius={6}
-          opacity={terrainOpacity}
-          wireframe={terrainWireframe}
-        />
-      )}
-      
-      {terrainMeshType === 'grid-nearest' && (
-        <GridNearestTerrain
-          skiFeatures={skiFeatures}
-          center={center}
-          elevationScale={elevationScale}
-          bounds={bounds}
-          elevationOffset={terrainConfig?.elevationOffset || 0}
-          tubeRadius={6}
-          opacity={terrainOpacity}
-          wireframe={terrainWireframe}
-        />
-      )}
-      
-      {terrainMeshType === 'grid-bilinear' && (
-        <GridBilinearTerrain
-          skiFeatures={skiFeatures}
-          center={center}
-          elevationScale={elevationScale}
-          bounds={bounds}
-          elevationOffset={terrainConfig?.elevationOffset || 0}
-          tubeRadius={6}
-          opacity={terrainOpacity}
-          wireframe={terrainWireframe}
-        />
-      )}
-      
-      {terrainMeshType === 'voronoi' && (
-        <VoronoiTerrain
-          skiFeatures={skiFeatures}
-          center={center}
-          elevationScale={elevationScale}
-          bounds={bounds}
-          elevationOffset={terrainConfig?.elevationOffset || 0}
-          tubeRadius={6}
-          opacity={terrainOpacity}
-          wireframe={terrainWireframe}
-        />
-      )}
-      
-      {terrainMeshType === 'convex-hull' && (
-        <ConvexHullTerrain
-          skiFeatures={skiFeatures}
-          center={center}
-          elevationScale={elevationScale}
-          bounds={bounds}
-          elevationOffset={terrainConfig?.elevationOffset || 0}
-          tubeRadius={6}
-          opacity={terrainOpacity}
-          wireframe={terrainWireframe}
-        />
       )}
     </>
   )
@@ -2603,20 +1837,222 @@ export default function SimpleMap3D({
   const controlsRef = useRef<any>(null)
   const [showFocusPlane, setShowFocusPlane] = useState(false)
   const [showAxes, setShowAxes] = useState(true)
-  const [terrainMeshType, setTerrainMeshType] = useState<TerrainMeshType>('none')
-  const [terrainOpacity, setTerrainOpacity] = useState(0.7)
+  const [terrainMeshType, setTerrainMeshType] = useState<TerrainMeshType>('delaunay') // Default to delaunay for visibility
+  const [terrainOpacity, setTerrainOpacity] = useState(1) // Fully opaque white
   const [terrainWireframe, setTerrainWireframe] = useState(false)
-  const [useVoronoiLineThickness, setUseVoronoiLineThickness] = useState(false)
+  const [terrainColor, setTerrainColor] = useState('#ffffff') // White
+  const [terrainThickness, setTerrainThickness] = useState(0) // Thickness of terrain mesh
+  const [terrainExtendEdges, setTerrainExtendEdges] = useState(0) // Distance to extend edges outward
+  const [terrainEdgeColor, setTerrainEdgeColor] = useState('#888888') // Grey for peaks/edges
+  const terrainGeometryRef = useRef<THREE.BufferGeometry | null>(null)
+  const [importedMeshGeometry, setImportedMeshGeometry] = useState<THREE.BufferGeometry | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   
-  const terrainMeshTypes: { value: TerrainMeshType; label: string; description: string }[] = [
-    { value: 'none', label: 'None', description: 'No terrain/ground mesh' },
-    { value: 'delaunay', label: 'Delaunay Triangulation', description: 'Triangulated surface from trail points' },
-    { value: 'point-cloud', label: 'Point Cloud', description: 'Points showing terrain data density' },
-    { value: 'heightmap-grid', label: 'Heightmap Grid', description: 'Regular grid with smooth interpolation' },
-    { value: 'grid-nearest', label: 'Grid (Nearest)', description: 'Grid using nearest point elevation' },
-    { value: 'grid-bilinear', label: 'Grid (Bilinear)', description: 'Grid with bilinear interpolation' },
-    { value: 'voronoi', label: 'Voronoi Diagram', description: 'Voronoi cells from trail points' },
-    { value: 'convex-hull', label: 'Convex Hull', description: 'Convex boundary mesh' },
+  // Function to import mesh from OBJ format
+  const importMeshFromOBJ = (file: File) => {
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      try {
+        const objContent = e.target?.result as string
+        if (!objContent) {
+          alert('Failed to read OBJ file')
+          return
+        }
+        
+        // Parse OBJ file
+        const lines = objContent.split('\n')
+        const vertices: number[] = []
+        const faces: number[] = []
+        
+        let vertexCount = 0
+        let faceLineCount = 0
+        let skippedFaces = 0
+        
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (trimmed.startsWith('v ')) {
+            // Vertex: v x y z
+            const parts = trimmed.split(/\s+/)
+            if (parts.length >= 4) {
+              const x = parseFloat(parts[1])
+              const y = parseFloat(parts[2])
+              const z = parseFloat(parts[3])
+              if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
+                vertices.push(x, y, z)
+                vertexCount++
+              }
+            }
+          } else if (trimmed.startsWith('f ')) {
+            // Face: f v1 v2 v3 [v4] (OBJ uses 1-based indexing, can be negative for relative)
+            const parts = trimmed.split(/\s+/).filter(p => p.length > 0)
+            if (parts.length >= 4) {
+              // Extract vertex indices (handle formats: "f 1 2 3", "f 1/1/1 2/2/2 3/3/3", "f -1 -2 -3")
+              const parseVertexIndex = (part: string): number | null => {
+                const vertexPart = part.split('/')[0].trim()
+                if (!vertexPart) return null
+                
+                let index = parseInt(vertexPart)
+                if (isNaN(index)) return null
+                
+                // Handle negative indices (relative to end of vertex list)
+                if (index < 0) {
+                  index = vertices.length / 3 + index + 1 // +1 because OBJ is 1-based
+                }
+                
+                // Convert to 0-based and validate
+                const zeroBased = index - 1
+                if (zeroBased < 0 || zeroBased >= vertices.length / 3) {
+                  console.warn(`Invalid vertex index: ${index} (max: ${vertices.length / 3})`)
+                  return null
+                }
+                
+                return zeroBased
+              }
+              
+              const vertexIndices: number[] = []
+              for (let i = 1; i < parts.length; i++) {
+                const idx = parseVertexIndex(parts[i])
+                if (idx !== null) {
+                  vertexIndices.push(idx)
+                }
+              }
+              
+              // Triangulate faces (handle quads and n-gons)
+              if (vertexIndices.length >= 3) {
+                // Triangulate: for n vertices, create n-2 triangles
+                for (let i = 1; i < vertexIndices.length - 1; i++) {
+                  faces.push(vertexIndices[0], vertexIndices[i], vertexIndices[i + 1])
+                }
+                faceLineCount++
+              } else {
+                skippedFaces++
+              }
+            } else {
+              skippedFaces++
+            }
+          }
+        }
+        
+        if (vertices.length === 0) {
+          alert('No vertices found in OBJ file')
+          return
+        }
+        
+        if (faces.length === 0) {
+          alert('No faces found in OBJ file')
+          return
+        }
+        
+        console.log('OBJ Import Summary:', {
+          vertices: vertexCount,
+          faceLines: faceLineCount,
+          triangles: faces.length / 3,
+          skippedFaces: skippedFaces
+        })
+        
+        // Create BufferGeometry from imported mesh
+        const geometry = new THREE.BufferGeometry()
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
+        geometry.setIndex(faces)
+        geometry.computeVertexNormals()
+        
+        // Add vertex colors if needed (using current color settings)
+        const baseColor = new THREE.Color(terrainColor)
+        const edgeColorObj = new THREE.Color(terrainEdgeColor)
+        const colors: number[] = []
+        
+        // Simple color assignment - you can enhance this later
+        for (let i = 0; i < vertices.length / 3; i++) {
+          // For imported mesh, use base color by default
+          colors.push(baseColor.r, baseColor.g, baseColor.b)
+        }
+        geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
+        
+        // Ensure terrain mesh type is set to show the mesh
+        if (terrainMeshType === 'none') {
+          setTerrainMeshType('delaunay')
+        }
+        
+        setImportedMeshGeometry(geometry)
+        terrainGeometryRef.current = geometry
+        
+        console.log('Mesh imported:', {
+          vertices: vertices.length / 3,
+          faces: faces.length / 3,
+          hasGeometry: !!geometry,
+          positionCount: geometry.attributes.position?.count || 0,
+          indexCount: geometry.index?.count || 0
+        })
+        
+        alert(`Mesh imported successfully!\nVertices: ${vertices.length / 3}\nFaces: ${faces.length / 3}\n\nThe imported mesh should now be visible.`)
+      } catch (error) {
+        console.error('Error importing OBJ:', error)
+        alert(`Error importing OBJ file: ${error}`)
+      }
+    }
+    reader.onerror = () => {
+      alert('Failed to read file')
+    }
+    reader.readAsText(file)
+  }
+  
+  // Function to export mesh to OBJ format
+  const exportMeshToOBJ = () => {
+    if (!terrainGeometryRef.current) {
+      alert('No terrain mesh available to export. Please enable the terrain mesh first.')
+      return
+    }
+    
+    const geometry = terrainGeometryRef.current
+    const positions = geometry.attributes.position
+    const indices = geometry.index
+    
+    if (!positions || !indices) {
+      alert('Mesh geometry is incomplete. Cannot export.')
+      return
+    }
+    
+    // Build OBJ file content
+    let objContent = `# Terrain Mesh Export\n`
+    objContent += `# Generated from SimpleMap3D\n`
+    objContent += `# Vertices: ${positions.count}, Faces: ${indices.count / 3}\n\n`
+    
+    // Write vertices (OBJ uses 1-based indexing)
+    for (let i = 0; i < positions.count; i++) {
+      const x = positions.getX(i)
+      const y = positions.getY(i)
+      const z = positions.getZ(i)
+      objContent += `v ${x} ${y} ${z}\n`
+    }
+    
+    objContent += `\n`
+    
+    // Write faces (OBJ uses 1-based indexing)
+    const indexArray = indices.array
+    for (let i = 0; i < indices.count; i += 3) {
+      const v1 = indexArray[i] + 1
+      const v2 = indexArray[i + 1] + 1
+      const v3 = indexArray[i + 2] + 1
+      objContent += `f ${v1} ${v2} ${v3}\n`
+    }
+    
+    // Create download
+    const blob = new Blob([objContent], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `terrain-mesh-${resortName || 'export'}-${Date.now()}.obj`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+    
+    alert(`Mesh exported! Import into Blender with:\n- Forward: -Z\n- Up: Y\n\nAfter editing, export with same settings.`)
+  }
+  
+  const terrainMeshTypes: { value: TerrainMeshType; label: string }[] = [
+    { value: 'none', label: 'None' },
+    { value: 'delaunay', label: 'Delaunay Triangulation' },
   ]
   
   // Calculate scene center and bounds
@@ -2676,21 +2112,8 @@ export default function SimpleMap3D({
           elevationScale={elevationScale}
         />
         
-        {/* Lighting with shadows */}
-        <ambientLight intensity={0.5} />
-        <directionalLight 
-          position={[1000, 2000, 1000]} 
-          intensity={1.9}
-          castShadow
-          shadow-mapSize-width={2048}
-          shadow-mapSize-height={2048}
-          shadow-camera-far={50000}
-          shadow-camera-left={-10000}
-          shadow-camera-right={10000}
-          shadow-camera-top={10000}
-          shadow-camera-bottom={-10000}
-          shadow-bias={-0.01}
-        />
+        {/* Soft, even lighting - no shadows or shininess */}
+        <ambientLight intensity={1.0} />
         
         {/* Camera */}
         <PerspectiveCamera makeDefault position={[0, 1000, 1000]} fov={60} near={10} far={100000} />
@@ -2702,6 +2125,7 @@ export default function SimpleMap3D({
           minDistance={100}
           maxDistance={50000}
           target={[0, 0, 0]}
+          screenSpacePanning={true}
         />
         
         {/* Scene with terrain and trails */}
@@ -2714,7 +2138,14 @@ export default function SimpleMap3D({
           terrainMeshType={terrainMeshType}
           terrainOpacity={terrainOpacity}
           terrainWireframe={terrainWireframe}
-          useVoronoiLineThickness={useVoronoiLineThickness}
+          terrainColor={terrainColor}
+          terrainThickness={terrainThickness}
+          terrainExtendEdges={terrainExtendEdges}
+          terrainEdgeColor={terrainEdgeColor}
+          onTerrainGeometryReady={(geometry) => {
+            terrainGeometryRef.current = geometry
+          }}
+          importedMeshGeometry={importedMeshGeometry}
         />
         
         {/* Auto-position camera based on trails */}
@@ -2723,6 +2154,7 @@ export default function SimpleMap3D({
           center={center}
           controlsRef={controlsRef}
           elevationScale={elevationScale}
+          screenTargetPosition={[0.5, 0.1]}
         />
         
         {/* Depth of Field Effect - DISABLED for performance */}
@@ -2748,18 +2180,8 @@ export default function SimpleMap3D({
             <span>Show Axes (X=red, Y=green, Z=blue)</span>
           </label>
           
-          <label className="flex items-center gap-2 text-xs cursor-pointer">
-            <input
-              type="checkbox"
-              checked={useVoronoiLineThickness}
-              onChange={(e) => setUseVoronoiLineThickness(e.target.checked)}
-              className="w-3 h-3"
-            />
-            <span>Variable Line Thickness (based on Voronoi cell size)</span>
-          </label>
-          
           <div className="border-t border-gray-200 pt-2">
-            <label className="block text-xs font-semibold mb-1">Terrain/Ground Mesh Type:</label>
+            <label className="block text-xs font-semibold mb-1">Terrain Mesh:</label>
             <select
               value={terrainMeshType}
               onChange={(e) => setTerrainMeshType(e.target.value as TerrainMeshType)}
@@ -2767,13 +2189,10 @@ export default function SimpleMap3D({
             >
               {terrainMeshTypes.map((type) => (
                 <option key={type.value} value={type.value}>
-                  {type.label} - {type.description}
+                  {type.label}
                 </option>
               ))}
             </select>
-            <p className="text-xs text-gray-500 mt-1">
-              Current: <strong>{terrainMeshTypes.find(t => t.value === terrainMeshType)?.label}</strong>
-            </p>
             
             {terrainMeshType !== 'none' && (
               <>
@@ -2791,27 +2210,126 @@ export default function SimpleMap3D({
                     className="w-full"
                   />
                 </div>
-                {terrainMeshType === 'delaunay' && (
-                  <label className="flex items-center gap-2 text-xs cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={terrainWireframe}
-                      onChange={(e) => setTerrainWireframe(e.target.checked)}
-                      className="w-3 h-3"
-                    />
-                    <span>Wireframe Mode</span>
+                <label className="flex items-center gap-2 text-xs cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={terrainWireframe}
+                    onChange={(e) => setTerrainWireframe(e.target.checked)}
+                    className="w-3 h-3"
+                  />
+                  <span>Wireframe Mode</span>
+                </label>
+                <div className="mt-2">
+                  <label className="block text-xs mb-1">
+                    Base Color:
                   </label>
-                )}
+                  <input
+                    type="color"
+                    value={terrainColor}
+                    onChange={(e) => setTerrainColor(e.target.value)}
+                    className="w-full h-6 cursor-pointer"
+                  />
+                </div>
+                <div className="mt-2">
+                  <label className="block text-xs mb-1">
+                    Edge/Peak Color:
+                  </label>
+                  <input
+                    type="color"
+                    value={terrainEdgeColor}
+                    onChange={(e) => setTerrainEdgeColor(e.target.value)}
+                    className="w-full h-6 cursor-pointer"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Color for peaks, ridges, and pointy parts
+                  </p>
+                </div>
+                <div className="mt-2">
+                  <label className="block text-xs mb-1">
+                    Thickness: {terrainThickness.toFixed(0)} units
+                  </label>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1000"
+                    step="10"
+                    value={terrainThickness}
+                    onChange={(e) => setTerrainThickness(parseFloat(e.target.value))}
+                    className="w-full"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    {terrainThickness === 0 ? 'Flat surface' : 'Extruded downward'}
+                  </p>
+                </div>
+                <div className="mt-2">
+                  <label className="block text-xs mb-1">
+                    Extend Edges: {terrainExtendEdges.toFixed(0)} units
+                  </label>
+                  <input
+                    type="range"
+                    min="0"
+                    max="5000"
+                    step="50"
+                    value={terrainExtendEdges}
+                    onChange={(e) => setTerrainExtendEdges(parseFloat(e.target.value))}
+                    className="w-full"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    {terrainExtendEdges === 0 ? 'Original boundaries' : 'Extended outward for infinite look'}
+                  </p>
+                </div>
+                <div className="mt-3 pt-2 border-t border-gray-200">
+                  <div className="space-y-2">
+                    <button
+                      onClick={exportMeshToOBJ}
+                      className="w-full px-3 py-2 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+                      title="Export mesh to OBJ format for editing in Blender"
+                    >
+                      Export to OBJ (Blender)
+                    </button>
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="w-full px-3 py-2 text-xs bg-green-500 text-white rounded hover:bg-green-600 transition-colors"
+                      title="Import edited mesh from Blender"
+                    >
+                      Import from OBJ (Blender)
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".obj"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0]
+                        if (file) {
+                          importMeshFromOBJ(file)
+                        }
+                        // Reset input so same file can be selected again
+                        e.target.value = ''
+                      }}
+                      className="hidden"
+                    />
+                    {importedMeshGeometry && (
+                      <button
+                        onClick={() => {
+                          setImportedMeshGeometry(null)
+                          terrainGeometryRef.current = null
+                        }}
+                        className="w-full px-3 py-2 text-xs bg-red-500 text-white rounded hover:bg-red-600 transition-colors"
+                        title="Clear imported mesh and use generated mesh"
+                      >
+                        Clear Imported Mesh
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    {importedMeshGeometry 
+                      ? 'Using imported mesh from Blender' 
+                      : 'Export/import mesh for editing in Blender'}
+                  </p>
+                </div>
               </>
             )}
           </div>
-          
-        <button
-          onClick={() => setShowFocusPlane(!showFocusPlane)}
-            className="mt-1 px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600"
-        >
-          {showFocusPlane ? 'Hide' : 'Show'} Focus Plane
-        </button>
         </div>
       </div>
     </div>
