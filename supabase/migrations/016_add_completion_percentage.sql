@@ -9,3 +9,4 @@ COMMENT ON COLUMN run_completions.completion_percentage IS 'Percentage of the ru
 CREATE INDEX IF NOT EXISTS idx_run_completions_completion_percentage ON run_completions(completion_percentage);
 
 
+

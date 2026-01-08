@@ -57,3 +57,4 @@ $$ LANGUAGE plpgsql;
 SELECT recalculate_descent_session_times();
 
 
+

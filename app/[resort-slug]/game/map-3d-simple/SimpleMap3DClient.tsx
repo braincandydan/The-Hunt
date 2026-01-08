@@ -1,15 +1,17 @@
 'use client'
 
+import { useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import ErrorBoundary from '@/components/ErrorBoundary'
 import SimpleMap3D from '@/components/game/SimpleMap3D'
-import { SkiFeature } from '@/lib/utils/types'
+import { SkiFeature, RunCompletion } from '@/lib/utils/types'
 
 interface SimpleMap3DClientProps {
   resortSlug: string
   resortName: string
   skiFeatures: SkiFeature[]
+  userRunCompletions: Array<Pick<RunCompletion, 'id' | 'gps_track' | 'completed_at' | 'ski_feature_id' | 'ski_feature'>>
 }
 
 function ErrorFallback() {
@@ -39,9 +41,19 @@ function ErrorFallback() {
 export default function SimpleMap3DClient({
   resortSlug,
   resortName,
-  skiFeatures
+  skiFeatures,
+  userRunCompletions
 }: SimpleMap3DClientProps) {
   const router = useRouter()
+
+  // Debug log
+  useEffect(() => {
+    console.log('SimpleMap3DClient received:', {
+      skiFeaturesCount: skiFeatures.length,
+      userRunCompletionsCount: userRunCompletions.length,
+      userRunCompletions: userRunCompletions.slice(0, 3) // Log first 3 for debugging
+    })
+  }, [skiFeatures, userRunCompletions])
 
   return (
     <div className="fixed inset-0 w-full h-full">
@@ -62,6 +74,9 @@ export default function SimpleMap3DClient({
           </div>
           <div className="text-sm text-gray-400">
             {skiFeatures.filter(f => f.type === 'trail').length} trails
+            {userRunCompletions.length > 0 && (
+              <span className="ml-2">• {userRunCompletions.length} logged runs</span>
+            )}
           </div>
         </div>
       </header>
@@ -72,6 +87,7 @@ export default function SimpleMap3DClient({
           <SimpleMap3D
             skiFeatures={skiFeatures}
             resortName={resortName}
+            userRunCompletions={userRunCompletions}
           />
         </ErrorBoundary>
       </div>

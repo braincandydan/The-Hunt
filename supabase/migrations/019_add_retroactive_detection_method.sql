@@ -11,3 +11,4 @@ ALTER TABLE run_completions
   CHECK (detection_method IN ('gps_proximity', 'manual', 'qr_scan', 'retroactive_detection'));
 
 
+
