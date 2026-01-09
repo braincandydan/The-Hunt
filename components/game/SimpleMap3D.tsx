@@ -543,19 +543,10 @@ function calculateMountainConeProfile(
     }
   }
   
-  // Top points: All 6 points are at the highest point's location
-  // Distance from centerPoint to highestPoint
-  const dxToHighest = highestPoint.x - centerPoint.x
-  const dzToHighest = highestPoint.z - centerPoint.z
-  const distToHighest = Math.sqrt(dxToHighest * dxToHighest + dzToHighest * dzToHighest)
-  
-  // All top points use the same radius (distance from center to highest point)
-  for (let dir = 0; dir < NUM_DIRECTIONS; dir++) {
-    radiusByDirection.get(dir)!.set(0, distToHighest) // Level 0 = top (at highest point)
-  }
-  
   // Bottom points: Use actual distance from centerPoint to each furthest point
   const yRange = maxY - minY
+  const bottomRadii: number[] = [] // Collect all found bottom radii for averaging
+  
   for (let dir = 0; dir < NUM_DIRECTIONS; dir++) {
     const bottomPoint = bottomPointsByDirection[dir]
     if (bottomPoint) {
@@ -563,6 +554,8 @@ function calculateMountainConeProfile(
       const dx = bottomPoint.x - centerPoint.x
       const dz = bottomPoint.z - centerPoint.z
       const distance = Math.sqrt(dx * dx + dz * dz)
+      
+      bottomRadii.push(distance) // Collect for averaging
       
       // Map this point's Y (its actual elevation) to a sample level
       const yLevel = yRange > 0 
@@ -575,17 +568,36 @@ function calculateMountainConeProfile(
       
       // Also set at bottom level for interpolation
       radiusByDirection.get(dir)!.set(Y_SAMPLE_LEVELS - 1, distance)
-    } else {
-      // Fallback: use default radius
-      const fallbackRadius = distToHighest + 5000
-      radiusByDirection.get(dir)!.set(Y_SAMPLE_LEVELS - 1, fallbackRadius)
     }
+  }
+  
+  // Calculate average of found bottom radii for fallback and top radius calculation
+  const averageBottomRadius = bottomRadii.length > 0
+    ? bottomRadii.reduce((sum, r) => sum + r, 0) / bottomRadii.length
+    : 5000 // Fallback if no bottom points found
+  
+  // Use average for directions with no bottom point (improved fallback)
+  for (let dir = 0; dir < NUM_DIRECTIONS; dir++) {
+    if (!bottomPointsByDirection[dir]) {
+      // Use average of found bottom radii instead of arbitrary value
+      radiusByDirection.get(dir)!.set(Y_SAMPLE_LEVELS - 1, averageBottomRadius)
+    }
+  }
+  
+  // Top points: Use small percentage of average bottom radius to create true cone (not dome)
+  // This creates a pointy cone top instead of a flat circular dome
+  const TOP_RADIUS_PERCENTAGE = 0.03 // 3% of average bottom radius for cone top
+  const topRadius = averageBottomRadius * TOP_RADIUS_PERCENTAGE
+  
+  // All top points use the same small radius (creates pointy cone top)
+  for (let dir = 0; dir < NUM_DIRECTIONS; dir++) {
+    radiusByDirection.get(dir)!.set(0, topRadius) // Level 0 = top (at highest point)
   }
   
   // Interpolate between top and bottom for intermediate Y levels
   for (let dir = 0; dir < NUM_DIRECTIONS; dir++) {
-    const topRadiusForDir = radiusByDirection.get(dir)!.get(0) || distToHighest
-    const bottomRadiusForDir = radiusByDirection.get(dir)!.get(Y_SAMPLE_LEVELS - 1) || distToHighest + 5000
+    const topRadiusForDir = radiusByDirection.get(dir)!.get(0) || topRadius
+    const bottomRadiusForDir = radiusByDirection.get(dir)!.get(Y_SAMPLE_LEVELS - 1) || averageBottomRadius
     
     for (let yLevel = 1; yLevel < Y_SAMPLE_LEVELS - 1; yLevel++) {
       const t = yLevel / (Y_SAMPLE_LEVELS - 1) // 0 to 1 from top to bottom
@@ -780,7 +792,8 @@ function applyMountainConeConstraint(
   minY: number,
   radiusByDirection: Map<number, Map<number, number>>,
   numSampleLevels: number = 10,
-  lowestConePointY?: number  // Optional: the Y of the lowest cone bottom point
+  lowestConePointY?: number,  // Optional: the Y of the lowest cone bottom point
+  maxRadius?: number  // Optional: maximum radius for minimum radius calculation
 ): THREE.Vector3 {
   const constrained = focusPoint.clone()
   
@@ -795,7 +808,7 @@ function applyMountainConeConstraint(
   const angle = Math.atan2(dz, dx)
   
   // Get radius for this angle and Y level using smooth interpolation between directions
-  const radius = getRadiusForAngleAndY(
+  let radius = getRadiusForAngleAndY(
     radiusByDirection,
     angle,
     constrained.y,
@@ -805,7 +818,23 @@ function applyMountainConeConstraint(
     6 // numDirections
   )
   
-  // NO minimum radius constraint - let the red dot follow the true cone surface shape
+  // Add minimum radius constraint to prevent jittery behavior at top
+  // Calculate maxRadius from map if not provided
+  let effectiveMaxRadius = maxRadius
+  if (effectiveMaxRadius === undefined) {
+    // Calculate maxRadius from radiusByDirection map
+    effectiveMaxRadius = 0
+    for (const dirMap of radiusByDirection.values()) {
+      for (const r of dirMap.values()) {
+        effectiveMaxRadius = Math.max(effectiveMaxRadius, r)
+      }
+    }
+  }
+  
+  // Apply minimum radius (2% of maxRadius) to prevent jittery behavior at top
+  const MIN_RADIUS_PERCENTAGE = 0.02 // 2% minimum to prevent jittery behavior
+  const minRadius = effectiveMaxRadius * MIN_RADIUS_PERCENTAGE
+  radius = Math.max(minRadius, radius)
   
   // Project point onto cone surface at this radius
   const currentDistance = Math.sqrt(dx * dx + dz * dz)
@@ -1280,7 +1309,8 @@ function CameraController({
       yRange.min,
       mountainConeProfile.radiusByDirection,
       10,
-      lowestConePointY
+      lowestConePointY,
+      mountainConeProfile.maxRadius
     )
     
     target.x = constrained.x
@@ -1522,7 +1552,8 @@ function CameraController({
           yRange.min,
           mountainConeProfile.radiusByDirection,
           10, // numSampleLevels
-          lowestConePointY
+          lowestConePointY,
+          mountainConeProfile.maxRadius
         )
       } else {
         // Fallback to simple cone constraint
